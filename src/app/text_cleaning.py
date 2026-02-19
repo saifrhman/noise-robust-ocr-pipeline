@@ -89,25 +89,32 @@ def correct_with_lexicon(text: str, sym: SymSpell, max_edit_distance: int = 2) -
 
 
 
-def clean_ocr_text(
-    text: str,
-    lexicon_dict_path: str | Path = "assets/lexicon_dictionary.txt",
-    max_edit_distance: int = 2,
-) -> str:
+def clean_ocr_text(text: str, *args, **kwargs) -> str:
     """
-    Cleaner used by the app:
-      1) safe normalization (generic)
-      2) lexicon-based correction learned from SROIE train/box (no manual mapping)
+    Clean OCR text but PRESERVE line breaks.
+    Applies cleaning per line and rejoins with '\n'.
     """
-    global _symspell_singleton
+    if not isinstance(text, str) or not text.strip():
+        return ""
 
-    t = normalize_text_light(text)
+    lines = text.splitlines()
+    cleaned_lines = []
 
-    if _symspell_singleton is None:
-        _symspell_singleton = _load_symspell(lexicon_dict_path, max_edit_distance=max_edit_distance)
+    for ln in lines:
+        ln2 = ln
 
-    # If lexicon isn't available yet, just return normalized text
-    if _symspell_singleton is None:
-        return t
+        # --- keep whatever normalization you already do, but DO NOT use \s to collapse everything ---
+        # Example safe normalizations (keep yours if you already have them):
+        ln2 = re.sub(r"(\d{1,2}):(\d{2})[;](\d{2})", r"\1:\2:\3", ln2)
+        ln2 = re.sub(r"(\d)\s*,\s*(\d{2})\b", r"\1.\2", ln2)
+        ln2 = re.sub(r"(\d)\s*,\.\s*(\d{2})\b", r"\1.\2", ln2)
+        ln2 = re.sub(r"\s+([,.;:])", r"\1", ln2)
 
-    return correct_with_lexicon(t, _symspell_singleton, max_edit_distance=max_edit_distance)
+        # Collapse spaces/tabs ONLY (not newlines)
+        ln2 = re.sub(r"[ \t]{2,}", " ", ln2).strip()
+
+        cleaned_lines.append(ln2)
+
+    # Rejoin with newlines so extraction works
+    out = "\n".join([l for l in cleaned_lines if l != ""])
+    return out.strip()

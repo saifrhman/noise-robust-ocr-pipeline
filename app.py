@@ -17,7 +17,8 @@ from src.app.text_cleaning import clean_ocr_text
 # -----------------------------
 def ocr_text_from_results(results):
     parts = [r.get("text", "") for r in results if r.get("text")]
-    return " ".join(parts).strip()
+    # Keep line breaks (better for receipts); if OCR results are already per-line, this helps.
+    return "\n".join(parts).strip()
 
 
 def mean_conf(results):
@@ -105,27 +106,31 @@ if uploaded:
     else:
         out = run_ocr_on(img_rgb, mode)
 
-    chosen_mode = out["mode"]
+    chosen_mode = out.get("mode", "unknown")
 
     raw_text = out.get("text") or ""
 
+    # Cleaning can occasionally be overly aggressive / fail.
+    # Always keep a safe fallback so the app never shows an empty box if OCR found text.
     try:
         cleaned_text = clean_ocr_text(raw_text)
     except Exception:
         cleaned_text = ""
 
-    #  Force string (handles None returns)
     cleaned_text = cleaned_text or ""
     raw_text = raw_text or ""
 
-    #  Fallback: never show empty if OCR produced text
+    # ✅ Fallback: never show empty if OCR produced text
     if (not cleaned_text.strip()) and raw_text.strip():
         cleaned_text = raw_text
 
+    # ✅ IMPORTANT: Use RAW text for field extraction (structure),
+    # while using CLEANED text for display/editing.
+    parse_text = raw_text
 
-    conf = out["conf"]
-    score = out["score"]
-    processed = out["processed"]
+    conf = float(out.get("conf", 0.0))
+    score = float(out.get("score", 0.0))
+    processed = out.get("processed", None)
 
     with top_right:
         st.subheader("OCR Output")
@@ -133,7 +138,7 @@ if uploaded:
         st.markdown(f"**Mean confidence:** `{conf:.3f}`")
         st.markdown(f"**Blended score:** `{score:.3f}`")
 
-        if show_processed:
+        if show_processed and processed is not None:
             st.image(processed, caption="Processed for OCR", use_container_width=True)
 
     st.divider()
@@ -148,15 +153,16 @@ if uploaded:
             st.text_area("Raw OCR", value=raw_text, height=180)
 
     if show_debug:
-        with st.expander("Debug: raw vs cleaned length"):
+        with st.expander("Debug: lengths and parsing source"):
             st.write("raw length:", len(raw_text))
             st.write("cleaned length:", len(cleaned_text))
             st.write("edited length:", len(edited_text))
+            st.write("Parsing fields from:", "raw_text")
 
-    # Field extraction (functions are defensive, but we also pass a string)
-    merchant = guess_merchant(edited_text)
-    date = extract_date(edited_text)
-    totals = extract_totals(edited_text)
+    # ✅ Field extraction uses parse_text (raw) for better structure
+    merchant = guess_merchant(parse_text)
+    date = extract_date(parse_text)
+    totals = extract_totals(parse_text)
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Merchant (guess)", merchant or "—")
@@ -173,6 +179,7 @@ if uploaded:
         "merchant_guess": merchant,
         "date": date,
         "totals": totals,
+        # export the editable (cleaned) text the user sees/edits
         "text": edited_text,
     }
 
@@ -185,9 +192,9 @@ if uploaded:
             rows.append(
                 {
                     "mode": m,
-                    "conf": o["conf"],
-                    "score": o["score"],
-                    "preview": (o["text"][:80] + ("..." if len(o["text"]) > 80 else "")),
+                    "conf": float(o.get("conf", 0.0)),
+                    "score": float(o.get("score", 0.0)),
+                    "preview": (o.get("text", "")[:80] + ("..." if len(o.get("text", "")) > 80 else "")),
                 }
             )
         df = pd.DataFrame(rows).sort_values("score", ascending=False)
