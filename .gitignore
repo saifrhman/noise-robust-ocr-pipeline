@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Environments
+.venv/
+
+# Editor
+.vscode/
+
+# Outputs
+outputs/*
+!outputs/.gitkeep
+
+# Datasets (don't commit)
+data/sroie_v2/
+data/sroie_v2/**
