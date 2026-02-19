@@ -4,7 +4,12 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from symspellpy import SymSpell, Verbosity
+try:
+    from symspellpy import SymSpell, Verbosity
+except ImportError:
+    SymSpell = None
+    Verbosity = None
+
 
 
 # -------------------------
