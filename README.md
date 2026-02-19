@@ -6,6 +6,8 @@ This project explores how image preprocessing techniques impact OCR performance 
 
 While LayoutLMv3 is a strong choice for layout-aware receipt understanding, this project focuses on a deployable OCR + preprocessing + heuristic extraction pipeline as a practical baseline. The system improves OCR robustness via adaptive preprocessing and extracts key fields (merchant/date/total) using lightweight parsing rules. LayoutLMv3 fine-tuning is a natural next step for improving generalization across diverse receipt layouts.
 
+The model is implemented at https://noise-robust-ocr-pipeline.streamlit.app/
+
 ---
 
 ## 🚀 Features
