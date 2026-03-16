@@ -1,112 +1,107 @@
-# 🧾 Noise-Robust OCR Pipeline
+# Noise-Robust OCR Pipeline
 
-A practical OCR pipeline designed to improve text recognition on noisy, real-world receipt images.
+Receipt OCR pipeline focused on noisy real-world images.
 
-This project explores how image preprocessing techniques impact OCR performance and implements an adaptive selection strategy to improve robustness.
+The project includes:
+- EasyOCR with adaptive preprocessing (`none`, `clahe`, `denoise`)
+- Heuristic receipt field extraction (merchant/date/total)
+- SROIE evaluation scripts
+- Streamlit app with two output tabs:
+  - `EasyOCR + Rules`
+  - `LayoutLMv3`
 
-While LayoutLMv3 is a strong choice for layout-aware receipt understanding, this project focuses on a deployable OCR + preprocessing + heuristic extraction pipeline as a practical baseline. The system improves OCR robustness via adaptive preprocessing and extracts key fields (merchant/date/total) using lightweight parsing rules. LayoutLMv3 fine-tuning is a natural next step for improving generalization across diverse receipt layouts.
+## Features
 
-The model is implemented at https://noise-robust-ocr-pipeline.streamlit.app/
+- EasyOCR text detection and recognition
+- Auto mode that selects the best preprocessing strategy
+- OCR confidence + text-quality blended scoring
+- Streamlit UI for upload, extraction, JSON/CSV export
+- LayoutLMv3 integration for token-level entity extraction
+- LayoutLMv3 fine-tuning script for receipt token classification
 
----
+## Project Structure
 
-## 🚀 Features
+```text
+app.py
+scripts/
+  train_layoutlmv3.py
+src/
+  layoutlmv3_engine.py
+  ocr_engine.py
+  preprocess.py
+  run_sroie_eval.py
+  app/
+    extract_fields.py
+    text_cleaning.py
+```
 
-- Receipt OCR using EasyOCR
-- Image preprocessing (CLAHE, denoise, thresholding)
-- Adaptive **auto-mode** selection
-- OCR confidence scoring
-- Character accuracy evaluation (SROIE v2)
-- Streamlit demo application
-- Text cleaning / normalization
-- Basic receipt field extraction:
-  - Merchant (heuristic)
-  - Date
-  - Total candidates
-
----
-
-## 🧠 Motivation
-
-OCR on receipts is notoriously unreliable due to:
-
-- Low contrast
-- Blur
-- Compression artifacts
-- Small fonts
-- Shadows / lighting variations
-
-Instead of blindly applying preprocessing, this project evaluates:
-
-> *When preprocessing helps vs hurts OCR performance.*
-
----
-
-## 📊 Evaluation (SROIE v2 Dataset)
-
-Evaluation performed on **200 training** and **200 test** receipts.
-
-### **Train Split**
-- Baseline (grayscale): **0.1215**
-- Auto-mode OCR: **0.1284**
-- Improvement: **+0.0069**
-- Improved samples: **56 / 200**
-
-### **Test Split**
-- Baseline (grayscale): **0.1285**
-- Auto-mode OCR: **0.1359**
-- Improvement: **+0.0074**
-- Improved samples: **53 / 200**
-
-Auto-mode adaptively selects preprocessing strategies based on:
-
-- OCR confidence
-- Heuristic text-quality scoring
-- Margin-based switching
-
----
-
-## 🖥 Demo Application
-
-Interactive Streamlit-based **Receipt OCR Extractor**
-
-### Capabilities
-
-- Upload receipt images
-- Adaptive OCR preprocessing (auto / manual modes)
-- OCR confidence + scoring
-- Cleaned OCR output
-- Raw OCR inspection
-- Merchant / date / total extraction
-- JSON export
-- CSV session history
-
----
-
-## ⚙️ Run Locally
-
-### 1️⃣ Clone repo
+## Setup
 
 ```bash
 git clone https://github.com/saifrhman/noise-robust-ocr-pipeline.git
 cd noise-robust-ocr-pipeline
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
+## Run the Streamlit App
 
-## Results (SROIE v2 – Receipt OCR)
+```bash
+streamlit run app.py
+```
 
-Evaluation performed on 200 training and 200 test receipts.
+In the app:
+- Use `EasyOCR + Rules` tab for current heuristic extraction.
+- Use `LayoutLMv3` tab and click `Run LayoutLMv3` for model-based entity output.
 
-### Train Split
-- Baseline (grayscale): 0.1215
-- Auto-mode OCR: 0.1284
-- Improvement: +0.0069
-- Improved samples: 56 / 200
+Important:
+- `microsoft/layoutlmv3-base` is not fine-tuned for receipt entities.
+- For meaningful merchant/date/total extraction, use a fine-tuned checkpoint path in the sidebar.
 
-### Test Split
-- Baseline (grayscale): 0.1285
-- Auto-mode OCR: 0.1359
-- Improvement: +0.0074
-- Improved samples: 53 / 200
+## Fine-Tune LayoutLMv3
 
-Auto-mode adaptively selects preprocessing strategies (none / CLAHE / denoise)
-based on OCR confidence and text-quality scoring.
+Fine-tuning script:
+- `scripts/train_layoutlmv3.py`
+
+Expected JSONL format (`train.jsonl` and `val.jsonl`):
+
+```json
+{"id":"sample-1","image_path":"data/receipts/img/1.jpg","tokens":["ACME","STORE"],"bboxes":[[10,20,120,45],[125,20,220,45]],"labels":["B-VENDOR","I-VENDOR"]}
+```
+
+Rules:
+- `tokens`, `bboxes`, and `labels` must have the same length.
+- Bounding boxes should be `[x1, y1, x2, y2]`.
+- The training script accepts either normalized (`0..1000`) boxes or pixel boxes and normalizes pixel boxes automatically.
+- Labels should use BIO format where possible (for example `B-DATE`, `I-DATE`, `B-TOTAL`).
+
+Training command example:
+
+```bash
+python scripts/train_layoutlmv3.py \
+  --train-jsonl data/layoutlmv3/train.jsonl \
+  --val-jsonl data/layoutlmv3/val.jsonl \
+  --output-dir outputs/layoutlmv3_receipts \
+  --model-name microsoft/layoutlmv3-base \
+  --epochs 8 \
+  --train-batch-size 2 \
+  --eval-batch-size 2 \
+  --learning-rate 3e-5
+```
+
+After training:
+- Set sidebar `Model/checkpoint path` to `outputs/layoutlmv3_receipts`
+- Open `LayoutLMv3` tab and run inference.
+
+## Evaluate EasyOCR Pipeline on SROIE
+
+```bash
+python -m src.run_sroie_eval --split train --mode auto --max 200
+python -m src.run_sroie_eval --split test --mode auto --max 200
+```
+
+## Notes
+
+- The EasyOCR pipeline remains the baseline and fallback.
+- LayoutLMv3 quality depends strongly on the dataset label quality and coverage.
