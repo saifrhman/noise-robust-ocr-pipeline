@@ -79,7 +79,7 @@ with st.sidebar:
     layout_model_path = st.text_input(
         "Model/checkpoint path",
         value="microsoft/layoutlmv3-base",
-        help="Use a fine-tuned token-classification checkpoint for receipt entities.",
+        help="Use a fine-tuned receipt KIE checkpoint. Base model is not suitable for extraction.",
     )
 
     st.divider()
@@ -234,7 +234,7 @@ if uploaded:
 
     with layout_tab:
         st.subheader("LayoutLMv3 Output")
-        st.caption("Run a fine-tuned checkpoint to get merchant/date/total entities.")
+        st.caption("Run a fine-tuned checkpoint to get merchant/date/address/total entities.")
 
         run_layout = st.button("Run LayoutLMv3", key="run_layoutlmv3")
         output_key = f"{uploaded.name}|{mode}|{chosen_mode}|{layout_model_path}"
@@ -263,20 +263,26 @@ if uploaded:
             st.error(prediction_error)
 
         if prediction and prediction_key == output_key:
+            prediction_warning = prediction.get("warning", "")
+            if prediction_warning:
+                st.warning(prediction_warning)
+
             if prediction.get("was_truncated"):
                 st.warning("OCR tokens were truncated to 512 words before inference.")
 
             fields = prediction.get("fields", {})
-            merchant_pred = (fields.get("merchant") or [None])[0]
-            date_pred = (fields.get("date") or [None])[0]
-            total_pred = (fields.get("total") or [None])[0]
+            merchant_pred = fields.get("merchant") or None
+            date_pred = fields.get("date") or None
+            address_pred = fields.get("address") or None
+            total_pred = fields.get("total") or None
 
-            c1, c2, c3 = st.columns(3)
+            c1, c2, c3, c4 = st.columns(4)
             c1.metric("Merchant (LayoutLMv3)", merchant_pred or "-")
             c2.metric("Date (LayoutLMv3)", date_pred or "-")
-            c3.metric("Total (LayoutLMv3)", total_pred or "-")
+            c3.metric("Address (LayoutLMv3)", address_pred or "-")
+            c4.metric("Total (LayoutLMv3)", total_pred or "-")
 
-            entities = prediction.get("entities", [])
+            entities = prediction.get("raw_entities", prediction.get("entities", []))
             if entities:
                 st.markdown("**Predicted Entities**")
                 st.dataframe(pd.DataFrame(entities), use_container_width=True)

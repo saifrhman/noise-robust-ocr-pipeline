@@ -17,12 +17,17 @@ The project includes:
 - OCR confidence + text-quality blended scoring
 - Streamlit UI for upload, extraction, JSON/CSV export
 - LayoutLMv3 integration for token-level entity extraction
-- LayoutLMv3 fine-tuning script for receipt token classification
+- LayoutLMv3 fine-tuning pipeline for receipt KIE with semantic BIO labels
 
 ## Project Structure
 
 ```text
 app.py
+train_layoutlmv3_receipts.py
+infer_layoutlmv3_receipt.py
+data_utils.py
+label_config.py
+README_finetuning.md
 scripts/
   train_layoutlmv3.py
 src/
@@ -58,6 +63,8 @@ In the app:
 Important:
 - `microsoft/layoutlmv3-base` is not fine-tuned for receipt entities.
 - For meaningful merchant/date/total extraction, use a fine-tuned checkpoint path in the sidebar.
+
+For the complete SROIE fine-tuning workflow, see `README_finetuning.md`.
 
 ## Fine-Tune LayoutLMv3
 

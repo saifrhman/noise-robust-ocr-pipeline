@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import re
 from typing import Any
 
 import numpy as np
 from PIL import Image
 import torch
+
+from label_config import FIELD_ALIASES, has_semantic_receipt_labels, split_bio
 
 try:
     from transformers import AutoModelForTokenClassification, AutoProcessor
@@ -42,14 +45,6 @@ def _normalize_box(box_xyxy: list[int], width: int, height: int) -> list[int]:
     ]
 
 
-def _dedup_preserve_order(values: list[str]) -> list[str]:
-    out: list[str] = []
-    for value in values:
-        if value not in out:
-            out.append(value)
-    return out
-
-
 def _to_words_and_boxes(
     ocr_results: list[dict[str, Any]],
     image_width: int,
@@ -82,17 +77,6 @@ def _to_words_and_boxes(
     return words, norm_boxes, abs_boxes, False
 
 
-def _split_bio_label(label: str) -> tuple[str, str]:
-    upper = (label or "O").upper()
-    if upper == "O":
-        return "O", "O"
-    if upper.startswith("B-"):
-        return "B", upper[2:]
-    if upper.startswith("I-"):
-        return "I", upper[2:]
-    return "B", upper
-
-
 @lru_cache(maxsize=2)
 def _load_layoutlmv3(model_name_or_path: str):
     if AutoProcessor is None or AutoModelForTokenClassification is None:
@@ -107,7 +91,88 @@ def _load_layoutlmv3(model_name_or_path: str):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()
-    return processor, model, device
+    id2label = {int(key): str(value) for key, value in model.config.id2label.items()}
+    return processor, model, device, id2label
+
+
+def _empty_fields() -> dict[str, str]:
+    return {"merchant": "", "date": "", "address": "", "total": ""}
+
+
+def _generic_checkpoint_warning(model_name_or_path: str, id2label: dict[int, str]) -> str:
+    model_name = (model_name_or_path or "").strip()
+    if model_name == "microsoft/layoutlmv3-base":
+        return (
+            "The selected checkpoint is microsoft/layoutlmv3-base, which is a pretrained backbone and "
+            "not a receipt KIE model. Fine-tune LayoutLMv3 on semantic receipt labels first."
+        )
+
+    if not has_semantic_receipt_labels(id2label):
+        return (
+            "Checkpoint labels are generic (for example LABEL_0/LABEL_1) or non-receipt schema. "
+            "Use a fine-tuned receipt KIE checkpoint with semantic BIO labels."
+        )
+
+    return ""
+
+
+def _decode_word_predictions(
+    logits: torch.Tensor,
+    encoding: Any,
+    words: list[str],
+    abs_boxes: list[list[int]],
+    id2label: dict[int, str],
+) -> list[dict[str, Any]]:
+    probs = torch.softmax(logits, dim=-1)[0]
+    word_ids = encoding.word_ids(batch_index=0)
+
+    per_word_label_scores: dict[int, dict[int, float]] = {}
+    per_word_counts: dict[int, int] = {}
+
+    for token_idx, word_idx in enumerate(word_ids):
+        if word_idx is None or word_idx >= len(words):
+            continue
+
+        if word_idx not in per_word_label_scores:
+            per_word_label_scores[word_idx] = {}
+            per_word_counts[word_idx] = 0
+
+        per_word_counts[word_idx] += 1
+        token_probs = probs[token_idx]
+
+        for label_id in range(token_probs.shape[0]):
+            score = float(token_probs[label_id].item())
+            per_word_label_scores[word_idx][label_id] = per_word_label_scores[word_idx].get(label_id, 0.0) + score
+
+    word_predictions: list[dict[str, Any]] = []
+    for word_idx in sorted(per_word_label_scores.keys()):
+        label_scores = per_word_label_scores[word_idx]
+        best_label_id = max(label_scores.items(), key=lambda item: item[1])[0]
+        count = max(per_word_counts.get(word_idx, 1), 1)
+        confidence = float(label_scores[best_label_id] / count)
+
+        word_predictions.append(
+            {
+                "word": words[word_idx],
+                "label": id2label.get(int(best_label_id), "O"),
+                "score": confidence,
+                "bbox": abs_boxes[word_idx] if word_idx < len(abs_boxes) else None,
+            }
+        )
+
+    return word_predictions
+
+
+def _merge_bbox(boxes: list[list[int]]) -> list[int] | None:
+    valid = [box for box in boxes if len(box) == 4]
+    if not valid:
+        return None
+
+    x1 = min(box[0] for box in valid)
+    y1 = min(box[1] for box in valid)
+    x2 = max(box[2] for box in valid)
+    y2 = max(box[3] for box in valid)
+    return [x1, y1, x2, y2]
 
 
 def _aggregate_entities(word_predictions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -115,9 +180,9 @@ def _aggregate_entities(word_predictions: list[dict[str, Any]]) -> list[dict[str
     current: dict[str, Any] | None = None
 
     for row in word_predictions:
-        prefix, entity_type = _split_bio_label(row["label"])
+        prefix, entity_type = split_bio(str(row.get("label", "O")))
 
-        if prefix == "O":
+        if prefix == "O" or entity_type not in FIELD_ALIASES:
             if current is not None:
                 entities.append(current)
                 current = None
@@ -130,11 +195,13 @@ def _aggregate_entities(word_predictions: list[dict[str, Any]]) -> list[dict[str
                 "entity": entity_type,
                 "tokens": [row["word"]],
                 "scores": [row["score"]],
+                "boxes": [row.get("bbox")],
             }
             continue
 
         current["tokens"].append(row["word"])
         current["scores"].append(row["score"])
+        current["boxes"].append(row.get("bbox"))
 
     if current is not None:
         entities.append(current)
@@ -146,40 +213,71 @@ def _aggregate_entities(word_predictions: list[dict[str, Any]]) -> list[dict[str
             continue
         out.append(
             {
-                "entity": row["entity"],
+                "label": row["entity"],
                 "text": token_text,
                 "score": float(sum(row["scores"]) / max(len(row["scores"]), 1)),
+                "bbox": _merge_bbox(row.get("boxes", [])),
             }
         )
-    return out
+    dedup: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in out:
+        key = (str(row["label"]), str(row["text"]).strip().upper())
+        best = dedup.get(key)
+        if best is None or float(row["score"]) > float(best["score"]):
+            dedup[key] = row
+
+    merged = list(dedup.values())
+    merged.sort(key=lambda item: float(item["score"]), reverse=True)
+    return merged
 
 
-def _collect_fields(entities: list[dict[str, Any]]) -> dict[str, list[str]]:
-    merchant: list[str] = []
-    date: list[str] = []
-    total: list[str] = []
+def _normalize_date(text: str) -> str:
+    value = (text or "").strip()
+    value = value.replace("-", "/").replace(".", "/")
+    value = re.sub(r"\s+", "", value)
 
-    for row in entities:
-        entity_type = row["entity"].lower()
-        value = row["text"].strip()
-        if not value:
-            continue
+    match = re.search(r"\b\d{1,4}/\d{1,2}/\d{1,4}\b", value)
+    if match:
+        return match.group(0)
+    return value
 
-        if any(key in entity_type for key in ["vendor", "merchant", "seller", "company", "store", "name"]):
-            merchant.append(value)
-        if "date" in entity_type:
-            date.append(value)
-        if any(key in entity_type for key in ["total", "amount", "sum", "grand"]):
-            total.append(value)
+
+def _normalize_total(text: str) -> str:
+    value = (text or "").strip()
+    value = value.replace(",", ".")
+    value = re.sub(r"(?<=\d)[Oo](?=[\d.])", "0", value)
+    value = re.sub(r"[^0-9. ]", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+
+    amounts = re.findall(r"\d+(?:\.\d{2})", value)
+    if amounts:
+        return amounts[-1]
+    return value
+
+
+def _best_field_value(entities: list[dict[str, Any]], label: str) -> str:
+    candidates = [row for row in entities if str(row.get("label", "")) == label]
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda row: float(row.get("score", 0.0)), reverse=True)
+    return str(candidates[0].get("text", "")).strip()
+
+
+def _collect_fields(entities: list[dict[str, Any]]) -> dict[str, str]:
+    company = _best_field_value(entities, "COMPANY")
+    date = _normalize_date(_best_field_value(entities, "DATE"))
+    address = _best_field_value(entities, "ADDRESS")
+    total = _normalize_total(_best_field_value(entities, "TOTAL"))
 
     return {
-        "merchant": _dedup_preserve_order(merchant),
-        "date": _dedup_preserve_order(date),
-        "total": _dedup_preserve_order(total),
+        "merchant": company,
+        "date": date,
+        "address": address,
+        "total": total,
     }
 
 
-def _processor_encode(processor, image: Image.Image, words: list[str], boxes: list[list[int]]):
+def _processor_encode(processor: Any, image: Image.Image, words: list[str], boxes: list[list[int]]) -> Any:
     """
     Transformers changed LayoutLMv3 processor inputs across versions.
     Prefer text=words and gracefully fallback to words=words.
@@ -198,13 +296,116 @@ def _processor_encode(processor, image: Image.Image, words: list[str], boxes: li
         return processor(words=words, **common_kwargs)
 
 
+def predict_layoutlmv3_from_words(
+    image_rgb: np.ndarray,
+    words: list[str],
+    boxes: list[list[int]],
+    abs_boxes: list[list[int]],
+    model_name_or_path: str,
+    was_truncated: bool = False,
+) -> dict[str, Any]:
+    if image_rgb.size == 0:
+        raise ValueError("image_rgb must be a non-empty RGB image array")
+
+    model_name = (model_name_or_path or "").strip()
+
+    if not words:
+        return {
+            "words": [],
+            "entities": [],
+            "raw_entities": [],
+            "fields": _empty_fields(),
+            "warning": "No OCR words were available for LayoutLMv3 inference.",
+            "model_is_receipt_finetuned": False,
+            "was_truncated": False,
+            "num_words": 0,
+        }
+
+    if model_name == "microsoft/layoutlmv3-base":
+        neutral_words = [
+            {
+                "word": words[idx],
+                "label": "O",
+                "score": 0.0,
+                "bbox": abs_boxes[idx] if idx < len(abs_boxes) else None,
+            }
+            for idx in range(len(words))
+        ]
+        return {
+            "words": neutral_words,
+            "entities": [],
+            "raw_entities": [],
+            "fields": _empty_fields(),
+            "warning": (
+                "The selected checkpoint is microsoft/layoutlmv3-base, which is a pretrained backbone and "
+                "not a receipt KIE model. Fine-tune LayoutLMv3 on semantic receipt labels first."
+            ),
+            "model_is_receipt_finetuned": False,
+            "was_truncated": was_truncated,
+            "num_words": len(words),
+        }
+
+    processor, model, device, id2label = _load_layoutlmv3(model_name_or_path)
+    warning = _generic_checkpoint_warning(model_name_or_path, id2label)
+    if warning:
+        neutral_words = [
+            {
+                "word": words[idx],
+                "label": "O",
+                "score": 0.0,
+                "bbox": abs_boxes[idx] if idx < len(abs_boxes) else None,
+            }
+            for idx in range(len(words))
+        ]
+        return {
+            "words": neutral_words,
+            "entities": [],
+            "raw_entities": [],
+            "fields": _empty_fields(),
+            "warning": warning,
+            "model_is_receipt_finetuned": False,
+            "was_truncated": was_truncated,
+            "num_words": len(words),
+        }
+
+    image = Image.fromarray(image_rgb)
+    encoding = _processor_encode(processor, image=image, words=words, boxes=boxes)
+    model_inputs = {key: value.to(device) for key, value in encoding.items() if hasattr(value, "to")}
+
+    with torch.inference_mode():
+        outputs = model(**model_inputs)
+
+    logits = outputs.logits.detach().cpu()
+    word_predictions = _decode_word_predictions(
+        logits=logits,
+        encoding=encoding,
+        words=words,
+        abs_boxes=abs_boxes,
+        id2label=id2label,
+    )
+
+    raw_entities = _aggregate_entities(word_predictions)
+    fields = _collect_fields(raw_entities)
+
+    return {
+        "words": word_predictions,
+        "entities": raw_entities,
+        "raw_entities": raw_entities,
+        "fields": fields,
+        "warning": "",
+        "model_is_receipt_finetuned": True,
+        "was_truncated": was_truncated,
+        "num_words": len(words),
+    }
+
+
 def predict_layoutlmv3_from_easyocr(
     image_rgb: np.ndarray,
     ocr_results: list[dict[str, Any]],
     model_name_or_path: str,
     max_words: int = 512,
 ) -> dict[str, Any]:
-    if image_rgb is None or image_rgb.size == 0:
+    if image_rgb.size == 0:
         raise ValueError("image_rgb must be a non-empty RGB image array")
 
     image_h, image_w = image_rgb.shape[:2]
@@ -215,65 +416,11 @@ def predict_layoutlmv3_from_easyocr(
         max_words=max_words,
     )
 
-    if not words:
-        return {
-            "words": [],
-            "entities": [],
-            "fields": {"merchant": [], "date": [], "total": []},
-            "was_truncated": False,
-            "num_words": 0,
-        }
-
-    processor, model, device = _load_layoutlmv3(model_name_or_path)
-    image = Image.fromarray(image_rgb)
-
-    encoding = _processor_encode(processor, image=image, words=words, boxes=boxes)
-
-    model_inputs = {key: value.to(device) for key, value in encoding.items() if hasattr(value, "to")}
-
-    with torch.inference_mode():
-        outputs = model(**model_inputs)
-
-    logits = outputs.logits.detach().cpu()
-    probs = torch.softmax(logits, dim=-1)
-    pred_ids = logits.argmax(dim=-1)[0].tolist()
-
-    id2label = {int(key): value for key, value in model.config.id2label.items()}
-
-    word_ids = encoding.word_ids(batch_index=0)
-    seen_word_ids: set[int] = set()
-    word_predictions: list[dict[str, Any]] = []
-
-    for token_idx, word_idx in enumerate(word_ids):
-        if word_idx is None:
-            continue
-        if word_idx in seen_word_ids:
-            continue
-        if word_idx >= len(words):
-            continue
-
-        seen_word_ids.add(word_idx)
-
-        pred_id = int(pred_ids[token_idx])
-        label = id2label.get(pred_id, str(pred_id))
-        score = float(probs[0, token_idx, pred_id].item())
-
-        word_predictions.append(
-            {
-                "word": words[word_idx],
-                "label": label,
-                "score": score,
-                "bbox": abs_boxes[word_idx],
-            }
-        )
-
-    entities = _aggregate_entities(word_predictions)
-    fields = _collect_fields(entities)
-
-    return {
-        "words": word_predictions,
-        "entities": entities,
-        "fields": fields,
-        "was_truncated": was_truncated,
-        "num_words": len(words),
-    }
+    return predict_layoutlmv3_from_words(
+        image_rgb=image_rgb,
+        words=words,
+        boxes=boxes,
+        abs_boxes=abs_boxes,
+        model_name_or_path=model_name_or_path,
+        was_truncated=was_truncated,
+    )
