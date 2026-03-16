@@ -179,6 +179,25 @@ def _collect_fields(entities: list[dict[str, Any]]) -> dict[str, list[str]]:
     }
 
 
+def _processor_encode(processor, image: Image.Image, words: list[str], boxes: list[list[int]]):
+    """
+    Transformers changed LayoutLMv3 processor inputs across versions.
+    Prefer text=words and gracefully fallback to words=words.
+    """
+    common_kwargs = {
+        "images": image,
+        "boxes": boxes,
+        "truncation": True,
+        "padding": "max_length",
+        "return_tensors": "pt",
+    }
+
+    try:
+        return processor(text=words, **common_kwargs)
+    except (TypeError, KeyError):
+        return processor(words=words, **common_kwargs)
+
+
 def predict_layoutlmv3_from_easyocr(
     image_rgb: np.ndarray,
     ocr_results: list[dict[str, Any]],
@@ -208,14 +227,7 @@ def predict_layoutlmv3_from_easyocr(
     processor, model, device = _load_layoutlmv3(model_name_or_path)
     image = Image.fromarray(image_rgb)
 
-    encoding = processor(
-        images=image,
-        words=words,
-        boxes=boxes,
-        truncation=True,
-        padding="max_length",
-        return_tensors="pt",
-    )
+    encoding = _processor_encode(processor, image=image, words=words, boxes=boxes)
 
     model_inputs = {key: value.to(device) for key, value in encoding.items() if hasattr(value, "to")}
 

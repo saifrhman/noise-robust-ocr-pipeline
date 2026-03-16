@@ -126,20 +126,37 @@ def normalize_bboxes(bboxes: list[list[int]], width: int, height: int) -> list[l
     return out
 
 
+def encode_layout_features(processor, image: Image.Image, tokens: list[str], boxes: list[list[int]], word_labels: list[int]):
+    """
+    Handle LayoutLMv3 processor API differences across transformers versions.
+    """
+    common_kwargs = {
+        "images": image,
+        "boxes": boxes,
+        "word_labels": word_labels,
+        "truncation": True,
+        "padding": "max_length",
+        "return_tensors": "pt",
+    }
+
+    try:
+        return processor(text=tokens, **common_kwargs)
+    except (TypeError, KeyError):
+        return processor(words=tokens, **common_kwargs)
+
+
 def make_encoder(processor, label2id: dict[str, int]):
     def encode(example: dict[str, Any]) -> dict[str, Any]:
         image = Image.open(example["image_path"]).convert("RGB")
         word_labels = [label2id[label] for label in example["labels"]]
         boxes = normalize_bboxes(example["bboxes"], image.width, image.height)
 
-        encoded = processor(
-            images=image,
-            words=example["tokens"],
+        encoded = encode_layout_features(
+            processor=processor,
+            image=image,
+            tokens=example["tokens"],
             boxes=boxes,
             word_labels=word_labels,
-            truncation=True,
-            padding="max_length",
-            return_tensors="pt",
         )
 
         out: dict[str, Any] = {}
