@@ -10,7 +10,6 @@ from src.receipt_ai.parsing.normalization import (
     extract_currency,
     extract_date_time,
     normalize_date,
-    parse_amount,
     unique_preserve_order,
 )
 from src.receipt_ai.schemas import (

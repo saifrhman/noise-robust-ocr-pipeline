@@ -97,6 +97,9 @@ class ExtractionMetadata:
     mode: str = ""
     confidence: float = 0.0
     source_image: str = ""
+    warnings: list[str] = field(default_factory=list)
+    field_confidences: dict[str, float] = field(default_factory=dict)
+    field_provenance: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -133,6 +136,8 @@ class ModelPrediction:
     token_labels: list[str] = field(default_factory=list)
     token_scores: list[float] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    field_confidences: dict[str, float] = field(default_factory=dict)
+    result: ReceiptExtractionResult | None = None
 
 
 @dataclass(slots=True)

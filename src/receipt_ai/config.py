@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import os
 
+from src.receipt_ai.model.labels import SEMANTIC_BIO_LABELS
+
 
 @dataclass(slots=True)
 class PathsConfig:
@@ -34,45 +36,7 @@ class OCRConfig:
 class LabelConfig:
     """LayoutLMv3 BIO label schema and maps for receipt token classification."""
 
-    labels: list[str] = field(
-        default_factory=lambda: [
-            "O",
-            "B-VENDOR_NAME",
-            "I-VENDOR_NAME",
-            "B-ADDRESS",
-            "I-ADDRESS",
-            "B-REG_NO",
-            "I-REG_NO",
-            "B-INVOICE_TYPE",
-            "I-INVOICE_TYPE",
-            "B-BILL_NO",
-            "I-BILL_NO",
-            "B-ORDER_NO",
-            "I-ORDER_NO",
-            "B-TABLE_NO",
-            "I-TABLE_NO",
-            "B-DATE",
-            "I-DATE",
-            "B-TIME",
-            "I-TIME",
-            "B-CASHIER",
-            "I-CASHIER",
-            "B-ITEM_NAME",
-            "I-ITEM_NAME",
-            "B-ITEM_QTY",
-            "I-ITEM_QTY",
-            "B-ITEM_PRICE",
-            "I-ITEM_PRICE",
-            "B-SUBTOTAL",
-            "I-SUBTOTAL",
-            "B-TAX",
-            "I-TAX",
-            "B-TOTAL",
-            "I-TOTAL",
-            "B-PAYMENT_METHOD",
-            "I-PAYMENT_METHOD",
-        ]
-    )
+    labels: list[str] = field(default_factory=lambda: list(SEMANTIC_BIO_LABELS))
 
     @property
     def label2id(self) -> dict[str, int]:
