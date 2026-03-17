@@ -74,6 +74,11 @@ def main() -> None:
         was_truncated=bool(features.get("truncated", False)),
     )
 
+    ocr_text = str(features.get("raw_text", ""))
+    if ocr_text.strip():
+        from src.app.receipt_script_parser import parse_receipt_script
+        prediction["receipt_script"] = parse_receipt_script(ocr_text)
+
     if prediction.get("warning"):
         # Keep output machine-readable but explicit.
         payload = {
@@ -82,6 +87,7 @@ def main() -> None:
             "address": "",
             "total": "",
             "raw_entities": [],
+            "receipt_script": {},
             "warning": prediction.get("warning", ""),
         }
     else:
@@ -92,6 +98,7 @@ def main() -> None:
             "address": fields.get("address", ""),
             "total": fields.get("total", ""),
             "raw_entities": prediction.get("raw_entities", []),
+            "receipt_script": prediction.get("receipt_script", {}),
         }
 
     if args.pretty:

@@ -347,6 +347,11 @@ if uploaded:
             else:
                 st.info("No entities predicted by this checkpoint.")
 
+            receipt_script = prediction.get("receipt_script", {})
+            if receipt_script:
+                with st.expander("Parsed Receipt Script (Metadata from OCR)"):
+                    st.json(receipt_script)
+
             payload = {
                 "file": uploaded.name,
                 "model": layout_model_path,
@@ -355,10 +360,11 @@ if uploaded:
                 "num_words": prediction.get("num_words", 0),
                 "fields": fields,
                 "entities": entities,
+                "receipt_script": receipt_script,
             }
             st.download_button(
                 "Download LayoutLMv3 JSON",
-                data=json.dumps(payload, indent=2),
+                data=json.dumps(to_jsonable(payload), indent=2),
                 file_name="receipt_layoutlmv3_result.json",
                 mime="application/json",
             )
