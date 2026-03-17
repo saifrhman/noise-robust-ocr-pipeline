@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from src.receipt_ai.config import ReceiptAIConfig
 from src.receipt_ai.dataset_loader import SROIEDatasetLoader
 from src.receipt_ai.model.alignment import build_weak_bio_labels
 from src.receipt_ai.model.labels import ENTITY_NAMES
@@ -26,6 +25,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    from src.receipt_ai.config import ReceiptAIConfig
+    
     args = parse_args()
     cfg = ReceiptAIConfig.from_env()
     cfg.paths.data_root = Path(args.dataset_root).expanduser().resolve()
