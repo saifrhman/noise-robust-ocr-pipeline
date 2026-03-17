@@ -9,6 +9,8 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+from torch.utils.data import Sampler, WeightedRandomSampler
 from transformers import AutoModelForTokenClassification, Trainer, TrainingArguments, set_seed
 
 try:
@@ -51,12 +53,93 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-val-samples", type=int, default=None)
+    parser.add_argument("--loss-type", choices=["ce", "focal"], default="ce")
+    parser.add_argument("--focal-gamma", type=float, default=2.0)
+    parser.add_argument("--label-smoothing", type=float, default=0.0)
+    parser.add_argument("--use-class-weights", action="store_true")
+    parser.add_argument("--oversample-non-o", action="store_true")
+    parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--strict", action="store_true")
     return parser.parse_args()
 
 
+class ImbalanceAwareTrainer(Trainer):
+    def __init__(
+        self,
+        *args: Any,
+        class_weights: torch.Tensor | None = None,
+        loss_type: str = "ce",
+        focal_gamma: float = 2.0,
+        label_smoothing: float = 0.0,
+        sample_weights: list[float] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.class_weights = class_weights
+        self.loss_type = loss_type
+        self.focal_gamma = focal_gamma
+        self.label_smoothing = max(0.0, float(label_smoothing))
+        self.sample_weights = sample_weights
+
+    def _get_train_sampler(self, train_dataset=None) -> Sampler[Any] | None:
+        dataset = train_dataset if train_dataset is not None else self.train_dataset
+        if not self.sample_weights or dataset is None or not hasattr(dataset, "__len__"):
+            return super()._get_train_sampler(train_dataset=train_dataset)
+        if len(self.sample_weights) != len(dataset):
+            return super()._get_train_sampler(train_dataset=train_dataset)
+        return WeightedRandomSampler(weights=self.sample_weights, num_samples=len(self.sample_weights), replacement=True)
+
+    def compute_loss(
+        self,
+        model: Any,
+        inputs: dict[str, torch.Tensor],
+        return_outputs: bool = False,
+        num_items_in_batch: Any = None,
+    ):
+        labels = inputs.get("labels")
+        outputs = model(**{k: v for k, v in inputs.items() if k != "labels"})
+        logits = outputs.get("logits")
+
+        if labels is None or logits is None:
+            loss = outputs.loss if hasattr(outputs, "loss") else None
+            if loss is None:
+                raise ValueError("Model outputs do not include loss/logits and labels were not provided.")
+            return (loss, outputs) if return_outputs else loss
+
+        active_mask = labels != -100
+        active_logits = logits[active_mask]
+        active_labels = labels[active_mask]
+        if active_logits.numel() == 0:
+            zero = logits.sum() * 0.0
+            return (zero, outputs) if return_outputs else zero
+
+        weight = self.class_weights.to(active_logits.device) if self.class_weights is not None else None
+        ce = F.cross_entropy(
+            active_logits,
+            active_labels,
+            weight=weight,
+            reduction="none",
+            label_smoothing=self.label_smoothing,
+        )
+        if self.loss_type == "focal":
+            pt = torch.exp(-ce)
+            loss = (((1.0 - pt) ** self.focal_gamma) * ce).mean()
+        else:
+            loss = ce.mean()
+        return (loss, outputs) if return_outputs else loss
+
+
 def main() -> None:
     args = parse_args()
+    if args.smoke:
+        args.epochs = 1
+        args.max_train_samples = args.max_train_samples or 64
+        args.max_val_samples = args.max_val_samples or 32
+        args.save_strategy = "epoch"
+        args.eval_strategy = "epoch"
+        args.logging_steps = min(args.logging_steps, 10)
+        args.experiment_name = args.experiment_name or "smoke"
+
     set_seed(args.seed)
 
     cfg = ReceiptAIConfig.from_env()
@@ -147,13 +230,16 @@ def main() -> None:
 
     training_args = TrainingArguments(**training_kwargs)
 
-    callbacks = []
+    callbacks: list[Any] = []
     if args.early_stopping_patience > 0:
         if EarlyStoppingCallback is None:
             raise ImportError("Current transformers version does not expose EarlyStoppingCallback.")
         callbacks.append(EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience))
 
-    trainer = Trainer(
+    class_weights = _build_class_weights(datasets.train_records) if args.use_class_weights else None
+    sample_weights = _build_sample_weights(datasets.train_records) if args.oversample_non_o else None
+
+    trainer = ImbalanceAwareTrainer(
         model=model,
         args=training_args,
         train_dataset=datasets.train_dataset,
@@ -162,13 +248,18 @@ def main() -> None:
         data_collator=builder.data_collator(),
         compute_metrics=compute_metrics,
         callbacks=callbacks,
+        class_weights=class_weights,
+        loss_type=args.loss_type,
+        focal_gamma=args.focal_gamma,
+        label_smoothing=args.label_smoothing,
+        sample_weights=sample_weights,
     )
     train_result = trainer.train()
     trainer.save_state()
     trainer.save_model(str(output_dir))
     processor.save_pretrained(str(output_dir))
 
-    train_metrics = trainer.log_metrics("train", train_result.metrics)
+    trainer.log_metrics("train", train_result.metrics)
     trainer.save_metrics("train", train_result.metrics)
     eval_metrics = trainer.evaluate()
     trainer.log_metrics("eval", eval_metrics)
@@ -179,6 +270,13 @@ def main() -> None:
         "label_count": len(SEMANTIC_BIO_LABELS),
         "train_samples": len(datasets.train_records),
         "val_samples": len(datasets.val_records),
+        "imbalance_strategy": {
+            "loss_type": args.loss_type,
+            "focal_gamma": args.focal_gamma,
+            "label_smoothing": args.label_smoothing,
+            "use_class_weights": args.use_class_weights,
+            "oversample_non_o": args.oversample_non_o,
+        },
         "train_label_distribution": _label_distribution(datasets.train_records),
         "val_label_distribution": _label_distribution(datasets.val_records),
         "train_metrics": train_result.metrics,
@@ -192,6 +290,33 @@ def _label_distribution(records: list[dict[str, Any]]) -> dict[str, int]:
     for record in records:
         counts.update(record.get("labels", []))
     return dict(sorted(counts.items()))
+
+
+def _build_class_weights(records: list[dict[str, Any]]) -> torch.Tensor:
+    counts: Counter[str] = Counter()
+    for record in records:
+        counts.update(record.get("labels", []))
+
+    weights = torch.ones(len(LABEL2ID), dtype=torch.float)
+    total = sum(max(count, 1) for count in counts.values())
+    for label, idx in LABEL2ID.items():
+        count = max(int(counts.get(label, 0)), 1)
+        weights[idx] = float(total / (len(LABEL2ID) * count))
+    weights = weights / max(weights.mean().item(), 1e-8)
+    return weights
+
+
+def _build_sample_weights(records: list[dict[str, Any]]) -> list[float]:
+    weights: list[float] = []
+    for record in records:
+        labels = list(record.get("labels", []))
+        if not labels:
+            weights.append(1.0)
+            continue
+        non_o = sum(1 for label in labels if label != "O")
+        ratio = non_o / max(len(labels), 1)
+        weights.append(max(0.25, 0.5 + 5.0 * ratio))
+    return weights
 
 
 if __name__ == "__main__":

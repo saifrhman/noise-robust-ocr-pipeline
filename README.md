@@ -25,6 +25,136 @@ Core capabilities:
 - Streamlit UI for upload, review, and JSON export
 - training and evaluation utilities for receipt extraction workflows
 
+## Receipt AI Operational Workflow (src/receipt_ai)
+
+The `src/receipt_ai` package now supports a full train/evaluate/debug cycle for richer-schema LayoutLMv3 token classification.
+
+### 1) Training Sanity Check
+
+Use this before long runs to validate data quality and truncation risk.
+
+```bash
+python scripts/training_sanity_receipt_ai_layoutlmv3.py \
+  --dataset-root data/SROIE2019 \
+  --train-split train \
+  --val-split val \
+  --model-name outputs/layoutlmv3_sroie \
+  --max-length 512 \
+  --output-json outputs/training_sanity_check.json
+```
+
+Report includes:
+- split sizes
+- label distribution
+- O vs non-O token ratios
+- pseudo-only sample counts
+- max token counts before truncation
+- truncated example counts and lost-token stats
+- checkpoint compatibility summary
+
+### 2) Weak-Label Quality Analysis
+
+Analyze pseudo-label quality before training.
+
+```bash
+python scripts/analyze_weak_labels_receipt_ai.py \
+  --dataset-root data/SROIE2019 \
+  --split train \
+  --output-dir outputs/weak_label_analysis
+```
+
+Artifacts:
+- `train_summary.json`
+- `train_suspicious_samples.json`
+
+Summary includes:
+- per-class label counts
+- missing key entity counts (`vendor`, `date`, `total`)
+- field-source counts (`gold_sroie` vs `pseudo_rules`)
+- item coverage stats
+- suspicious sample flags (missing essentials, excessive item tags, item spans without prices)
+
+### 3) Short Sanity Training Run
+
+Use `--smoke` for a reproducible short run that still saves checkpoints and metrics.
+
+```bash
+python scripts/train_receipt_ai_layoutlmv3.py \
+  --dataset-root data/SROIE2019 \
+  --model-name microsoft/layoutlmv3-base \
+  --output-dir outputs/layoutlmv3_receipt_ai \
+  --experiment-name smoke_richer \
+  --smoke \
+  --loss-type focal \
+  --focal-gamma 2.0 \
+  --use-class-weights \
+  --oversample-non-o
+```
+
+Training imbalance controls (all optional):
+- `--loss-type ce|focal`
+- `--focal-gamma`
+- `--label-smoothing`
+- `--use-class-weights`
+- `--oversample-non-o`
+
+### 4) Evaluate, Inspect, Batch
+
+Evaluate:
+
+```bash
+python scripts/evaluate_receipt_ai_layoutlmv3.py \
+  --dataset-root data/SROIE2019 \
+  --split test \
+  --checkpoint outputs/layoutlmv3_receipt_ai/smoke_richer \
+  --output-dir outputs/layoutlmv3_eval
+```
+
+Inspect one sample:
+
+```bash
+python scripts/inspect_receipt_ai_layoutlmv3.py \
+  --dataset-root data/SROIE2019 \
+  --split train \
+  --sample-id X51005453804 \
+  --checkpoint outputs/layoutlmv3_receipt_ai/smoke_richer \
+  --output-json outputs/layoutlmv3_inspect.json
+```
+
+Batch inference:
+
+```bash
+python scripts/run_receipt_ai_batch.py \
+  --mode hybrid \
+  --dataset-root data/SROIE2019 \
+  --split test \
+  --output-dir outputs/receipt_ai_batch
+```
+
+### 5) Post-Train Checkpoint Validation
+
+Validate label maps and inference behavior on one sample:
+
+```bash
+python scripts/validate_receipt_ai_checkpoint.py \
+  --dataset-root data/SROIE2019 \
+  --split test \
+  --checkpoint outputs/layoutlmv3_receipt_ai/smoke_richer \
+  --output-json outputs/checkpoint_validation.json
+```
+
+Checks:
+- richer-schema compatibility
+- `id2label` / `label2id` consistency
+- one-sample inference execution
+- structured decoder output presence
+
+### Legacy vs Richer Checkpoints
+
+- Legacy reduced-label checkpoints (for example, only vendor/address/date/total) are still supported for limited inference.
+- They are reported as `is_legacy=true` in compatibility checks.
+- Full richer-schema extraction quality requires a checkpoint trained with the current semantic BIO label set.
+
 ## Extraction Modes
 
 ### EasyOCR + Rules
