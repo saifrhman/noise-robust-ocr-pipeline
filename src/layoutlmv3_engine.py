@@ -9,7 +9,6 @@ from PIL import Image
 import torch
 
 from label_config import FIELD_ALIASES, has_semantic_receipt_labels, split_bio
-from src.app.receipt_script_parser import parse_receipt_script
 
 try:
     from transformers import AutoModelForTokenClassification, AutoProcessor
@@ -305,6 +304,10 @@ def predict_layoutlmv3_from_words(
     model_name_or_path: str,
     was_truncated: bool = False,
 ) -> dict[str, Any]:
+    """
+    Pure LayoutLMv3 token classification inference.
+    Returns model-only predictions without receipt script parsing.
+    """
     if image_rgb.size == 0:
         raise ValueError("image_rgb must be a non-empty RGB image array")
 
@@ -316,7 +319,6 @@ def predict_layoutlmv3_from_words(
             "entities": [],
             "raw_entities": [],
             "fields": _empty_fields(),
-            "receipt_script": {},
             "warning": "No OCR words were available for LayoutLMv3 inference.",
             "model_is_receipt_finetuned": False,
             "was_truncated": False,
@@ -338,7 +340,6 @@ def predict_layoutlmv3_from_words(
             "entities": [],
             "raw_entities": [],
             "fields": _empty_fields(),
-            "receipt_script": {},
             "warning": (
                 "The selected checkpoint is microsoft/layoutlmv3-base, which is a pretrained backbone and "
                 "not a receipt KIE model. Fine-tune LayoutLMv3 on semantic receipt labels first."
@@ -365,7 +366,6 @@ def predict_layoutlmv3_from_words(
             "entities": [],
             "raw_entities": [],
             "fields": _empty_fields(),
-            "receipt_script": {},
             "warning": warning,
             "model_is_receipt_finetuned": False,
             "was_truncated": was_truncated,
@@ -396,7 +396,6 @@ def predict_layoutlmv3_from_words(
         "entities": raw_entities,
         "raw_entities": raw_entities,
         "fields": fields,
-        "receipt_script": {},
         "warning": "",
         "model_is_receipt_finetuned": True,
         "was_truncated": was_truncated,
@@ -409,8 +408,11 @@ def predict_layoutlmv3_from_easyocr(
     ocr_results: list[dict[str, Any]],
     model_name_or_path: str,
     max_words: int = 512,
-    ocr_text: str = "",
 ) -> dict[str, Any]:
+    """
+    Pure LayoutLMv3 inference from EasyOCR results.
+    Returns model-only predictions without receipt script parsing.
+    """
     if image_rgb.size == 0:
         raise ValueError("image_rgb must be a non-empty RGB image array")
 
@@ -422,9 +424,6 @@ def predict_layoutlmv3_from_easyocr(
         max_words=max_words,
     )
 
-    if not ocr_text.strip():
-        ocr_text = "\n".join([(row.get("text") or "").strip() for row in ocr_results if row.get("text")])
-
     prediction = predict_layoutlmv3_from_words(
         image_rgb=image_rgb,
         words=words,
@@ -434,7 +433,31 @@ def predict_layoutlmv3_from_easyocr(
         was_truncated=was_truncated,
     )
 
-    if ocr_text.strip():
-        prediction["receipt_script"] = parse_receipt_script(ocr_text)
-
     return prediction
+
+
+def predict_layoutlmv3_with_hybrid(
+    image_rgb: np.ndarray,
+    ocr_results: list[dict[str, Any]],
+    model_name_or_path: str,
+    max_words: int = 512,
+) -> tuple[dict[str, Any], str]:
+    """
+    Run LayoutLMv3 inference and extract OCR text for hybrid mode.
+    Returns (model_prediction, ocr_text) tuple for hybrid fusion.
+    """
+    if image_rgb.size == 0:
+        raise ValueError("image_rgb must be a non-empty RGB image array")
+
+    # Extract OCR text
+    ocr_text = "\n".join([(row.get("text") or "").strip() for row in ocr_results if row.get("text")])
+
+    # Run pure model inference
+    prediction = predict_layoutlmv3_from_easyocr(
+        image_rgb=image_rgb,
+        ocr_results=ocr_results,
+        model_name_or_path=model_name_or_path,
+        max_words=max_words,
+    )
+
+    return prediction, ocr_text
