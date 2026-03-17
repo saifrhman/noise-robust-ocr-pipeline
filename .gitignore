@@ -20,3 +20,10 @@ outputs/*
 # Datasets (don't commit)
 data/sroie_v2/
 data/sroie_v2/**
+
+# model weights
+data/SROIE2019/layoutlm-base-uncased/
+*.bin
+
+# optional: ignore dataset artifacts too
+data/SROIE2019/

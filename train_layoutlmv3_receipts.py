@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 from pathlib import Path
 from typing import Any
@@ -27,9 +28,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Fine-tune LayoutLMv3 for receipt key information extraction (SROIE-style)."
     )
-    parser.add_argument("--train-dir", required=True, help="Split folder, for example data/sroie_kie/train")
-    parser.add_argument("--val-dir", default=None, help="Optional validation split folder")
-    parser.add_argument("--output-dir", required=True, help="Output checkpoint directory")
+    parser.add_argument(
+        "--train-dir",
+        default="data/SROIE2019/train",
+        help="Training split folder (default: data/SROIE2019/train)",
+    )
+    parser.add_argument(
+        "--val-dir",
+        default="data/SROIE2019/test",
+        help="Validation split folder (default: data/SROIE2019/test). Use empty string to auto-split train.",
+    )
+    parser.add_argument("--output-dir", default="outputs/layoutlmv3_sroie", help="Output checkpoint directory")
     parser.add_argument("--model-name", default="microsoft/layoutlmv3-base", help="Base checkpoint")
     parser.add_argument("--image-dir-name", default="img", help="Image folder name inside split")
     parser.add_argument("--ocr-dir-name", default="box", help="OCR text folder name inside split")
@@ -145,7 +154,19 @@ def _limit_rows(rows: list[dict[str, Any]], limit: int | None) -> list[dict[str,
 
 def _load_records(args: argparse.Namespace) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     train_dir = Path(args.train_dir).resolve()
-    val_dir = Path(args.val_dir).resolve() if args.val_dir else None
+    val_dir = Path(args.val_dir).resolve() if args.val_dir and str(args.val_dir).strip() else None
+
+    if not train_dir.exists():
+        raise FileNotFoundError(
+            f"Training directory not found: {train_dir}. "
+            "Expected SROIE layout such as data/SROIE2019/train/{img,box,entities}."
+        )
+
+    if val_dir is not None and not val_dir.exists():
+        raise FileNotFoundError(
+            f"Validation directory not found: {val_dir}. "
+            "Use --val-dir '' to auto-split training data if needed."
+        )
     entity_dirs = [item.strip() for item in args.entity_dir_names.split(",") if item.strip()]
 
     train_rows = load_sroie_split_records(
@@ -211,25 +232,32 @@ def main() -> None:
 
     seqeval_metric = evaluate.load("seqeval")
 
-    training_args = TrainingArguments(
-        output_dir=str(output_dir),
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
-        learning_rate=args.learning_rate,
-        per_device_train_batch_size=args.train_batch_size,
-        per_device_eval_batch_size=args.eval_batch_size,
-        num_train_epochs=args.epochs,
-        weight_decay=args.weight_decay,
-        warmup_ratio=args.warmup_ratio,
-        save_total_limit=2,
-        load_best_model_at_end=True,
-        metric_for_best_model="f1",
-        greater_is_better=True,
-        remove_unused_columns=False,
-        fp16=torch.cuda.is_available(),
-        logging_steps=20,
-        report_to="none",
-    )
+    training_kwargs: dict[str, Any] = {
+        "output_dir": str(output_dir),
+        "save_strategy": "epoch",
+        "learning_rate": args.learning_rate,
+        "per_device_train_batch_size": args.train_batch_size,
+        "per_device_eval_batch_size": args.eval_batch_size,
+        "num_train_epochs": args.epochs,
+        "weight_decay": args.weight_decay,
+        "warmup_ratio": args.warmup_ratio,
+        "save_total_limit": 2,
+        "load_best_model_at_end": True,
+        "metric_for_best_model": "f1",
+        "greater_is_better": True,
+        "remove_unused_columns": False,
+        "fp16": torch.cuda.is_available(),
+        "logging_steps": 20,
+        "report_to": "none",
+    }
+
+    training_sig = inspect.signature(TrainingArguments.__init__).parameters
+    if "evaluation_strategy" in training_sig:
+        training_kwargs["evaluation_strategy"] = "epoch"
+    elif "eval_strategy" in training_sig:
+        training_kwargs["eval_strategy"] = "epoch"
+
+    training_args = TrainingArguments(**training_kwargs)
 
     trainer = Trainer(
         model=model,

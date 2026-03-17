@@ -70,6 +70,7 @@ def extract_words_boxes_from_ocr_results(
     boxes_1000: list[list[int]] = []
     abs_boxes: list[list[int]] = []
     confidences: list[float] = []
+    line_texts: list[str] = []
 
     for row in ocr_results:
         text = (row.get("text") or "").strip()
@@ -77,6 +78,8 @@ def extract_words_boxes_from_ocr_results(
         conf = float(row.get("conf", 0.0))
         if not text or not bbox:
             continue
+
+        line_texts.append(text)
 
         xyxy = quad_to_xyxy(bbox)
         box_1000 = normalize_box_1000(xyxy, image_width, image_height)
@@ -95,6 +98,7 @@ def extract_words_boxes_from_ocr_results(
                     "boxes": boxes_1000,
                     "abs_boxes": abs_boxes,
                     "word_confidences": confidences,
+                    "line_texts": line_texts,
                     "truncated": True,
                 }
 
@@ -103,6 +107,7 @@ def extract_words_boxes_from_ocr_results(
         "boxes": boxes_1000,
         "abs_boxes": abs_boxes,
         "word_confidences": confidences,
+        "line_texts": line_texts,
         "truncated": False,
     }
 
@@ -115,6 +120,7 @@ def read_sroie_box_file(box_path: Path, image_width: int, image_height: int, max
     words: list[str] = []
     boxes_1000: list[list[int]] = []
     abs_boxes: list[list[int]] = []
+    line_texts: list[str] = []
 
     lines = box_path.read_text(encoding="utf-8", errors="ignore").splitlines()
     for line in lines:
@@ -135,6 +141,8 @@ def read_sroie_box_file(box_path: Path, image_width: int, image_height: int, max
         if not text:
             continue
 
+        line_texts.append(text)
+
         xs = [coords[0], coords[2], coords[4], coords[6]]
         ys = [coords[1], coords[3], coords[5], coords[7]]
         xyxy = [min(xs), min(ys), max(xs), max(ys)]
@@ -148,9 +156,21 @@ def read_sroie_box_file(box_path: Path, image_width: int, image_height: int, max
             boxes_1000.append(box_1000)
             abs_boxes.append(xyxy)
             if len(words) >= max_words:
-                return {"words": words, "boxes": boxes_1000, "abs_boxes": abs_boxes, "truncated": True}
+                return {
+                    "words": words,
+                    "boxes": boxes_1000,
+                    "abs_boxes": abs_boxes,
+                    "line_texts": line_texts,
+                    "truncated": True,
+                }
 
-    return {"words": words, "boxes": boxes_1000, "abs_boxes": abs_boxes, "truncated": False}
+    return {
+        "words": words,
+        "boxes": boxes_1000,
+        "abs_boxes": abs_boxes,
+        "line_texts": line_texts,
+        "truncated": False,
+    }
 
 
 def read_image_rgb(image_path: Path) -> np.ndarray:
@@ -198,7 +218,7 @@ def parse_entity_text_lines(lines: list[str]) -> dict[str, str]:
             continue
 
         key = canonical_entity_key(key_raw)
-        text = text_raw.strip()
+        text = text_raw.strip().strip(",").strip().strip('"').strip("'")
         if key and text:
             entities[key] = text
 
@@ -210,26 +230,27 @@ def load_receipt_entities(entity_path: Path | None) -> dict[str, str]:
     if entity_path is None or not entity_path.exists():
         return {}
 
-    if entity_path.suffix.lower() == ".json":
+    raw_text = entity_path.read_text(encoding="utf-8", errors="ignore").strip()
+
+    # SROIE entity annotations are often stored as .txt files containing JSON.
+    if raw_text.startswith("{") and raw_text.endswith("}"):
         try:
-            payload = json.loads(entity_path.read_text(encoding="utf-8"))
+            payload = json.loads(raw_text)
         except json.JSONDecodeError:
-            return {}
+            payload = None
 
-        if not isinstance(payload, dict):
-            return {}
+        if isinstance(payload, dict):
+            entities: dict[str, str] = {}
+            for key_raw, value_raw in payload.items():
+                key = canonical_entity_key(str(key_raw))
+                if key is None:
+                    continue
+                value = str(value_raw).strip().strip('"').strip("'")
+                if value:
+                    entities[key] = value
+            return entities
 
-        entities: dict[str, str] = {}
-        for key_raw, value_raw in payload.items():
-            key = canonical_entity_key(str(key_raw))
-            if key is None:
-                continue
-            value = str(value_raw).strip()
-            if value:
-                entities[key] = value
-        return entities
-
-    lines = entity_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    lines = raw_text.splitlines()
     return parse_entity_text_lines(lines)
 
 
@@ -436,6 +457,7 @@ def prepare_words_boxes_for_inference(
         "words": pack.get("words", []),
         "boxes": pack.get("boxes", []),
         "abs_boxes": pack.get("abs_boxes", []),
+        "raw_text": "\n".join([line for line in pack.get("line_texts", []) if isinstance(line, str) and line.strip()]).strip(),
         "truncated": bool(pack.get("truncated", False)),
     }
 

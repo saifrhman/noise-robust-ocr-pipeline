@@ -18,34 +18,28 @@ This project now uses an explicit semantic BIO schema from `label_config.py`:
 ## Expected SROIE-Style Data Layout
 
 ```text
-data/sroie_kie/
+data/SROIE2019/
   train/
     img/
-      X00016469670.jpg
-      ...
     box/
-      X00016469670.txt
-      ...
-    key/
-      X00016469670.json
-      ...
-  val/  # optional if you want explicit validation split
+    entities/
+  test/
     img/
     box/
-    key/
+    entities/
 ```
 
 Notes:
 - `box/*.txt` uses OCR lines in SROIE format: `x1,y1,x2,y2,x3,y3,x4,y4,text`.
-- `key/*.json` or `key/*.txt` should contain semantic field values (company/date/address/total).
+- `entities/*.txt` in this dataset contains JSON content with fields like `company`, `date`, `address`, `total`.
 - If `box/*.txt` is missing, you can enable EasyOCR fallback during training.
 
 ## Training Command (SROIE)
 
 ```bash
 python train_layoutlmv3_receipts.py \
-  --train-dir data/sroie_kie/train \
-  --val-dir data/sroie_kie/val \
+  --train-dir data/SROIE2019/train \
+  --val-dir data/SROIE2019/test \
   --output-dir outputs/layoutlmv3_sroie \
   --model-name microsoft/layoutlmv3-base \
   --epochs 8 \
@@ -58,7 +52,8 @@ Single split with automatic train/val split:
 
 ```bash
 python train_layoutlmv3_receipts.py \
-  --train-dir data/sroie_kie/train \
+  --train-dir data/SROIE2019/train \
+  --val-dir '' \
   --output-dir outputs/layoutlmv3_sroie \
   --validation-ratio 0.1
 ```
@@ -67,7 +62,7 @@ python train_layoutlmv3_receipts.py \
 
 ```bash
 python infer_layoutlmv3_receipt.py \
-  --image data/sroie_kie/val/img/X00016469670.jpg \
+  --image data/SROIE2019/test/img/X51007339116.jpg \
   --checkpoint outputs/layoutlmv3_sroie \
   --pretty
 ```
@@ -76,8 +71,8 @@ Optional explicit OCR file:
 
 ```bash
 python infer_layoutlmv3_receipt.py \
-  --image data/sroie_kie/val/img/X00016469670.jpg \
-  --ocr-path data/sroie_kie/val/box/X00016469670.txt \
+  --image data/SROIE2019/test/img/X51007339116.jpg \
+  --ocr-path data/SROIE2019/test/box/X51007339116.txt \
   --checkpoint outputs/layoutlmv3_sroie \
   --pretty
 ```

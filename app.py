@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -6,11 +7,24 @@ import streamlit as st
 from PIL import Image
 
 from src.app.extract_fields import extract_date, extract_totals, guess_merchant
+from src.app.receipt_script_parser import parse_receipt_script
 from src.app.text_cleaning import clean_ocr_text
 from src.evaluate import normalize_text
 from src.layoutlmv3_engine import predict_layoutlmv3_from_easyocr
 from src.ocr_engine import run_easyocr
 from src.preprocess import candidate_modes_for_auto, preprocess_for_ocr
+
+
+def to_jsonable(value):
+    if isinstance(value, dict):
+        return {str(k): to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [to_jsonable(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
 
 
 def ocr_text_from_results(results):
@@ -75,10 +89,14 @@ with st.sidebar:
     show_debug = st.checkbox("Show debug", value=False)
 
     st.divider()
+    default_layout_checkpoint = "outputs/layoutlmv3_sroie"
+    if not Path(default_layout_checkpoint).exists():
+        default_layout_checkpoint = "microsoft/layoutlmv3-base"
+
     st.header("LayoutLMv3")
     layout_model_path = st.text_input(
         "Model/checkpoint path",
-        value="microsoft/layoutlmv3-base",
+        value=default_layout_checkpoint,
         help="Use a fine-tuned receipt KIE checkpoint. Base model is not suitable for extraction.",
     )
 
@@ -156,6 +174,7 @@ if uploaded:
         merchant = guess_merchant(parse_text)
         date = extract_date(parse_text)
         totals = extract_totals(parse_text)
+        receipt_script = parse_receipt_script(edited_text)
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Merchant (guess)", merchant or "-")
@@ -174,6 +193,38 @@ if uploaded:
             "totals": totals,
             "text": edited_text,
         }
+
+        easyocr_payload = {
+            "file": uploaded.name,
+            "mode_selected": mode,
+            "chosen_mode": chosen_mode,
+            "auto_margin": margin if mode == "auto" else None,
+            "mean_conf": float(conf),
+            "score": float(score),
+            "merchant_guess": merchant,
+            "date": date,
+            "totals": totals,
+            "text_edited": edited_text,
+            "text_raw": raw_text,
+            "ocr_results": out.get("results", []),
+            "receipt_script": receipt_script,
+        }
+
+        extracted_text_payload = {
+            "file": uploaded.name,
+            "chosen_mode": chosen_mode,
+            "extracted_text": edited_text,
+            "raw_text": raw_text,
+            "rules": {
+                "merchant_guess": merchant,
+                "date": date,
+                "totals": totals,
+            },
+            "receipt_script": receipt_script,
+        }
+
+        with st.expander("Parsed Receipt Script (EasyOCR + Rules)"):
+            st.json(receipt_script)
 
         if compare_modes:
             st.subheader("Mode Comparison")
@@ -194,16 +245,23 @@ if uploaded:
             compare_df = pd.DataFrame(rows).sort_values("score", ascending=False)
             st.dataframe(compare_df, use_container_width=True)
 
-        a1, a2, _ = st.columns([1, 1, 2])
+        a1, a2, a3, _ = st.columns([1, 1, 1, 2])
         with a1:
             if st.button("Add to session history"):
                 st.session_state.history.append(result)
                 st.success("Added to history.")
         with a2:
             st.download_button(
-                "Download JSON",
-                data=pd.Series(result).to_json(),
-                file_name="receipt_ocr_result.json",
+                "Download EasyOCR JSON",
+                data=json.dumps(to_jsonable(easyocr_payload), indent=2),
+                file_name="receipt_easyocr_result.json",
+                mime="application/json",
+            )
+        with a3:
+            st.download_button(
+                "Download Extracted Text JSON",
+                data=json.dumps(to_jsonable(extracted_text_payload), indent=2),
+                file_name="receipt_extracted_text.json",
                 mime="application/json",
             )
 

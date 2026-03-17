@@ -68,7 +68,19 @@ For the complete SROIE fine-tuning workflow, see `README_finetuning.md`.
 
 ## Fine-Tune LayoutLMv3
 
-Fine-tuning script:
+Primary SROIE fine-tuning script:
+- `train_layoutlmv3_receipts.py`
+
+Default command for your current dataset layout:
+
+```bash
+python train_layoutlmv3_receipts.py \
+  --train-dir data/SROIE2019/train \
+  --val-dir data/SROIE2019/test \
+  --output-dir outputs/layoutlmv3_sroie
+```
+
+Legacy JSONL training script is still available at:
 - `scripts/train_layoutlmv3.py`
 
 Expected JSONL format (`train.jsonl` and `val.jsonl`):
@@ -100,6 +112,8 @@ python scripts/train_layoutlmv3.py \
 After training:
 - Set sidebar `Model/checkpoint path` to `outputs/layoutlmv3_receipts`
 - Open `LayoutLMv3` tab and run inference.
+
+For full SROIE instructions and examples, see `README_finetuning.md`.
 
 ## Evaluate EasyOCR Pipeline on SROIE
 
