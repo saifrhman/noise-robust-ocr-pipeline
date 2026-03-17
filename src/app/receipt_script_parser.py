@@ -10,7 +10,10 @@ DATE_COMPACT_RE = re.compile(r"\b(\d{2})[./-](\d{2})(\d{4})\b")
 TIME_RE = re.compile(r"\b(?:[01]?\d|2[0-3])[:.][0-5]\d(?:[:.][0-5]\d)?\b")
 GST_ID_RE = re.compile(r"GST\s*ID\s*[:#-]?\s*([A-Z0-9-]{6,})", re.IGNORECASE)
 COMPANY_REG_RE = re.compile(r"\(?\d{3,8}-?[A-Z]?\)?")
-INVOICE_NO_RE = re.compile(r"(?:INVOICE\s*(?:NO|#)?|NO)\s*[:#-]?\s*([A-Z]{0,4}\s*[-:]?\s*\d{3,})", re.IGNORECASE)
+INVOICE_NO_RE = re.compile(
+    r"(?:INVOICE\s*(?:NO|#)?|BILL\s*#?|ORDER\s*#?)\s*[:#-]?\s*([A-Z0-9]{1,10}(?:[-:][A-Z0-9]{2,})?)",
+    re.IGNORECASE,
+)
 
 
 def _clean_line(line: str) -> str:
@@ -96,6 +99,35 @@ def _extract_date(lines: list[str]) -> str:
         if m2:
             dd, mm, yyyy = m2.groups()
             return f"{dd}/{mm}/{yyyy}"
+    return ""
+
+
+def _extract_grand_total(lines: list[str]) -> str:
+    # Prefer explicit grand total lines like: TOTAL: 38.00
+    for line in lines:
+        up = line.upper()
+        if "TOTAL" not in up:
+            continue
+        if _contains_marker(up, "EXCL") or _contains_marker(up, "INCL"):
+            continue
+        if not re.search(r"\bTOTAL\b\s*[:=]", up):
+            continue
+        amounts = _extract_amounts(line)
+        if amounts:
+            return amounts[-1]
+    return ""
+
+
+def _extract_cash_paid_amount(lines: list[str]) -> str:
+    for line in lines:
+        up = line.upper()
+        if "CASHIER" in up:
+            continue
+        if not re.search(r"\bCASH\b", up):
+            continue
+        amounts = _extract_amounts(line)
+        if amounts:
+            return amounts[-1]
     return ""
 
 
@@ -187,6 +219,11 @@ def _extract_header(lines: list[str]) -> dict[str, Any]:
 def _find_totals_start(lines: list[str]) -> int:
     markers = ["TOTAL", "PAYABLE", "ROUNDING", "PAID AMOUNT", "PAID ARNOUNT", "CHANGE", "GST SUMMARY"]
     for idx, line in enumerate(lines):
+        up = line.upper()
+        # Ignore item table headers like "Qty Description Total TAX".
+        has_qty = _contains_marker(up, "QTY") or _contains_marker(up, "OTY")
+        if has_qty and _contains_marker(up, "DESC"):
+            continue
         if _line_has_keyword(line.upper(), markers):
             return idx
     return len(lines)
@@ -197,90 +234,141 @@ def _extract_line_items(lines: list[str], start_idx: int, end_idx: int) -> list[
     if start_idx >= end_idx:
         return out
 
-    skip_markers = [
+    meta_markers = [
         "TAX INVOICE",
         "INVOICE",
+        "TABLE",
+        "BILL",
+        "ORDER",
         "DATE",
-        "QTY TAX",
-        "OTY TAX",
-        "QTY",
-        "OTY",
-        " RM",
-        "GST",
-        "TOTAL",
-        "PAYABLE",
-        "PAID",
-        "CHANGE",
+        "CASHIER",
+        "SERVER",
+        "PAX",
+        "CLOSED",
+        "GST SUMMARY",
         "SUMMARY",
+        "PAYABLE",
+        "CHANGE",
     ]
 
-    idx = start_idx
-    while idx < end_idx:
-        line = lines[idx]
+    def _is_meta_line(line: str) -> bool:
         up = line.upper()
+        if _line_has_keyword(up, meta_markers):
+            return True
+        if ":" in line and _line_has_keyword(up, ["DATE", "CASH", "SERVER", "PAX"]):
+            return True
+        return False
 
-        if _line_has_keyword(up, skip_markers):
-            idx += 1
-            continue
+    def _parse_detail_line(line: str) -> dict[str, str] | None:
+        up = line.upper()
+        if _is_meta_line(line):
+            return None
 
-        has_letters = any(ch.isalpha() for ch in line)
-        if not has_letters:
-            idx += 1
-            continue
-
-        if re.fullmatch(r"[A-Z]{1,5}\s*[-:]?\s*\d{3,}", line.strip(), re.IGNORECASE):
-            idx += 1
-            continue
+        # Detail row normally starts with the purchase quantity.
+        qty_match = re.match(r"^\s*(\d{1,3}(?:[.,]\d{1,3})?)\b", line)
+        if not qty_match:
+            return None
 
         amounts = _extract_amounts(line)
-        qty_match = re.search(r"\b\d{1,3}(?:[.,]\d{1,3})?\b", line)
-        tax_match = re.search(r"\b(SR|ZR|TX|GST)\b", up)
+        tax_match = re.search(r"\b(SR|ZR|TX|SST|GST)\b", up)
 
-        description = line
-        qty = qty_match.group(0).replace(",", ".") if qty_match else ""
-        tax = tax_match.group(1) if tax_match else ""
+        if not amounts and not tax_match:
+            return None
+
+        qty = qty_match.group(1).replace(",", ".")
         amount = amounts[-1] if amounts else ""
+        tax_code = tax_match.group(1) if tax_match else ""
 
+        # Guard against OCR-created unrealistic amounts.
         if amount:
             try:
                 if float(amount) > 10000:
                     amount = ""
             except ValueError:
-                pass
+                amount = ""
 
-        # If this looks like a split line item, borrow numeric lines below.
-        if (not amount or not tax or not qty) and idx + 1 < end_idx:
-            for j in range(idx + 1, min(idx + 4, end_idx)):
-                next_line = lines[j]
-                next_amounts = _extract_amounts(next_line)
-                next_qty_match = re.search(r"\b\d{1,3}(?:[.,]\d{1,3})?\b", next_line)
-                next_tax_match = re.search(r"\b(SR|ZR|TX|GST)\b", next_line.upper())
+        return {"qty": qty, "tax_code": tax_code, "line_total": amount}
 
-                if next_amounts and not amount:
-                    amount = next_amounts[-1]
-                if next_qty_match and not qty:
-                    qty = next_qty_match.group(0).replace(",", ".")
-                if next_tax_match and not tax:
-                    tax = next_tax_match.group(1)
+    def _is_description_line(line: str) -> bool:
+        if _is_meta_line(line):
+            return False
+        if not any(ch.isalpha() for ch in line):
+            return False
+        if _parse_detail_line(line):
+            return False
+        if re.fullmatch(r"[A-Z]{1,5}\s*[-:]?\s*\d{3,}", line.strip(), re.IGNORECASE):
+            return False
+        return len(line.strip()) >= 3
 
-                if amount and (qty or tax):
-                    idx = j
-                    break
+    pending_detail: dict[str, str] | None = None
+    idx = start_idx
 
-        # Keep only likely product lines.
-        if len(description) >= 3 and (amount or qty):
-            out.append(
-                {
-                    "item_name": description,
-                    "qty": qty,
-                    "tax_code": tax,
-                    "line_total": amount,
-                }
-            )
+    while idx < end_idx:
+        line = lines[idx]
+
+        if _is_meta_line(line):
+            idx += 1
+            continue
+
+        detail = _parse_detail_line(line)
+        if detail:
+            pending_detail = detail
+            idx += 1
+            continue
+
+        if _is_description_line(line):
+            # Preferred pattern: detail line then description line.
+            if pending_detail:
+                out.append(
+                    {
+                        "item_name": line,
+                        "qty": pending_detail.get("qty", ""),
+                        "tax_code": pending_detail.get("tax_code", ""),
+                        "line_total": pending_detail.get("line_total", ""),
+                    }
+                )
+                pending_detail = None
+                idx += 1
+                continue
+
+            # Alternate pattern: description first, detail in following line(s).
+            for j in range(idx + 1, min(idx + 3, end_idx)):
+                next_detail = _parse_detail_line(lines[j])
+                if not next_detail:
+                    continue
+                out.append(
+                    {
+                        "item_name": line,
+                        "qty": next_detail.get("qty", ""),
+                        "tax_code": next_detail.get("tax_code", ""),
+                        "line_total": next_detail.get("line_total", ""),
+                    }
+                )
+                idx = j + 1
+                break
+            else:
+                idx += 1
+            continue
 
         idx += 1
 
     return out
+
+
+def _find_items_start(lines: list[str]) -> int:
+    # Prefer explicit table headers like: Qty Description Total TAX.
+    for idx, line in enumerate(lines):
+        up = line.upper()
+        has_qty = _contains_marker(up, "QTY") or _contains_marker(up, "OTY")
+        if has_qty and _contains_marker(up, "DESC"):
+            return idx + 1
+
+    # Fallback to after TAX INVOICE/INVOICE marker.
+    for idx, line in enumerate(lines):
+        if _contains_marker(line, "TAX INVOICE") or _contains_marker(line, "INVOICE"):
+            return idx + 1
+
+    return 0
 
 
 def parse_receipt_script(text: str) -> dict[str, Any]:
@@ -300,14 +388,20 @@ def parse_receipt_script(text: str) -> dict[str, Any]:
 
     totals = {
         "subtotal": _extract_key_amount(lines, ["SUBTOTAL", "SUB TOTAL"]),
-        "total_excl_gst": _extract_key_amount(lines, ["TOTAL EXCL", "EXCL GST"]),
-        "total_incl_gst": _extract_key_amount(lines, ["TOTAL INCL", "INCL GST"]),
+        "total_excl_gst": _extract_key_amount(lines, ["TOTAL EXCL", "EXCL GST", "EXCLUDING GST"]),
+        "total_incl_gst": _extract_key_amount(lines, ["TOTAL INCL", "INCL GST", "INCLUSIVE GST", "INCLUSIVE OF GST"]),
         "total_amt_payable": _extract_key_amount(lines, ["TOTAL AMT PAYABLE", "TOTAL AT PAYABLE", "AMT PAYABLE", "TOTAL PAYABLE"]),
-        "paid_amount": _extract_key_amount(lines, ["PAID AMOUNT", "PAID ARNOUNT", "CASH"]),
+        "paid_amount": _extract_key_amount(lines, ["PAID AMOUNT", "PAID ARNOUNT", "TENDERED", "AMOUNT PAID"]),
         "change": _extract_key_amount(lines, ["CHANGE"]),
         "rounding_adjustment": _extract_key_amount(lines, ["ROUNDING", "ADJUSTMENT"]),
         "total_qty_tender": _extract_key_amount(lines, ["TOTAL QTY TENDER", "TOTAL OTY TENDER", "QTY TENDER"]),
     }
+
+    if not totals.get("total_amt_payable"):
+        totals["total_amt_payable"] = _extract_grand_total(lines)
+
+    if not totals.get("paid_amount"):
+        totals["paid_amount"] = _extract_cash_paid_amount(lines)
 
     # Invoice number can appear as split tokens over multiple lines.
     if not header.get("invoice_no"):
@@ -343,11 +437,8 @@ def parse_receipt_script(text: str) -> dict[str, Any]:
                 }
             )
 
-    # Items section: between TAX INVOICE header and first totals marker.
-    item_start = 0
-    for idx, line in enumerate(lines):
-        if _contains_marker(line, "TAX INVOICE") or _contains_marker(line, "INVOICE"):
-            item_start = idx + 1
+    # Items section: between table header and first totals marker.
+    item_start = _find_items_start(lines)
 
     item_end = _find_totals_start(lines)
     line_items = _extract_line_items(lines, start_idx=item_start, end_idx=item_end)
