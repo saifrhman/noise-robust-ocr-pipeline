@@ -1,119 +1,195 @@
-# Noise-Robust OCR Pipeline
+# Hybrid Receipt Extraction System (OCR + LayoutLMv3)
 
-Receipt extraction system built around EasyOCR, a normalized rule parser, LayoutLMv3 token classification, and a hybrid fusion pipeline under [`src/receipt_ai`](/home/saif/Projects/noise-robust-ocr-pipeline/src/receipt_ai).
+Production-style receipt extraction system that combines OCR, rule-based parsing, and document AI into a single experiment-driven pipeline.
 
-The repo now has one production pipeline:
-- OCR: [`src/receipt_ai/ocr/easyocr_engine.py`](/home/saif/Projects/noise-robust-ocr-pipeline/src/receipt_ai/ocr/easyocr_engine.py)
-- Rules: [`src/receipt_ai/parsing/rules_parser.py`](/home/saif/Projects/noise-robust-ocr-pipeline/src/receipt_ai/parsing/rules_parser.py)
-- Model inference: [`src/receipt_ai/model/inference.py`](/home/saif/Projects/noise-robust-ocr-pipeline/src/receipt_ai/model/inference.py)
-- Fusion entrypoints: [`src/receipt_ai/pipelines/entrypoints.py`](/home/saif/Projects/noise-robust-ocr-pipeline/src/receipt_ai/pipelines/entrypoints.py)
-- Runtime defaults: [`default_config.json`](/home/saif/Projects/noise-robust-ocr-pipeline/default_config.json)
+## Overview
 
-## Project Overview
+Receipt extraction looks simple until it meets real data:
 
-The problem is noisy receipt extraction: OCR is imperfect, layout varies, and weak labels are often noisy. The solution in this repo is a practical layered pipeline:
+- OCR is noisy on crumpled, low-contrast, skewed, or low-resolution receipts.
+- Merchant layouts are inconsistent.
+- Pure rules are transparent but brittle.
+- Pure models are flexible but depend heavily on label quality and checkpoint quality.
 
-- EasyOCR provides text and boxes.
-- A rule parser extracts transparent baseline fields.
-- LayoutLMv3 predicts semantic entities from OCR tokens and geometry.
-- Hybrid fusion decides when model evidence should replace or supplement rules.
-- Training, evaluation, comparison, ablation, and experiment diagnosis scripts keep the system evidence-driven.
+This project solves that by combining:
 
-## Architecture
+- `EasyOCR` for text extraction
+- a normalized `rule-based parser` for deterministic field recovery
+- `LayoutLMv3` for token-level semantic extraction
+- `hybrid fusion` to decide when model output should override or complement rules
+- an `experiment-driven workflow` for training, comparison, diagnosis, ablation, and checkpoint promotion
 
-Runtime flow:
+What makes this system different is that it is not just an OCR demo or a model notebook. It is a full receipt extraction stack with:
 
-1. Image input
-2. OCR tokenization and line grouping
-3. One of:
-   - rules only
-   - model only
-   - hybrid fusion
-4. Schema-normalized JSON output
+- multiple runtime modes
+- reproducible training/evaluation workflows
+- weak-label filtering and confidence-aware supervision
+- structured experiment reports
+- policy selection and checkpoint-promotion support
+- both CLI and Streamlit interfaces
 
-Main runtime files:
-- [`run_receipt_ai.py`](/home/saif/Projects/noise-robust-ocr-pipeline/run_receipt_ai.py): simple CLI entrypoint
-- [`app.py`](/home/saif/Projects/noise-robust-ocr-pipeline/app.py): Streamlit demo app
-- [`src/receipt_ai/runtime/policy.py`](/home/saif/Projects/noise-robust-ocr-pipeline/src/receipt_ai/runtime/policy.py): default config loading
-- [`src/receipt_ai/runtime/runner.py`](/home/saif/Projects/noise-robust-ocr-pipeline/src/receipt_ai/runtime/runner.py): shared mode resolution and deterministic runtime setup
-- [`src/receipt_ai/runtime/output.py`](/home/saif/Projects/noise-robust-ocr-pipeline/src/receipt_ai/runtime/output.py): standardized JSON shaping
+## Key Features
 
-## Modes
+- EasyOCR-based receipt text extraction with geometric token/line structure
+- Rule-based parsing for vendor, invoice metadata, totals, payment, and line items
+- LayoutLMv3 token classification for semantic field extraction
+- Hybrid rules + model fusion with configurable thresholds and fallback behavior
+- Weak-label training pipeline with filtering, confidence-aware weighting, and critical-field boosting
+- End-to-end experiment cycle:
+  - train
+  - evaluate
+  - compare modes
+  - run ablations
+  - diagnose failures
+  - recommend fixes
+  - support checkpoint promotion decisions
+- Standardized JSON output schema
+- Streamlit UI for demo and inspection
+- CLI entrypoint for single-image and folder inference
 
-`easyocr_rules`
-- Most stable fallback.
-- Uses OCR plus rule parsing only.
-- Best choice when checkpoint evidence is weak or no valid checkpoint is available.
+## System Architecture
 
-`layoutlm_only`
-- Pure model extraction.
-- Useful for evaluating checkpoint quality directly.
-- Requires a valid fine-tuned receipt checkpoint.
+The runtime pipeline is:
 
-`hybrid`
-- Runs rules and model, then fuses fields by confidence and semantic thresholds.
-- Intended production mode when model evidence is strong enough.
+`Image -> OCR -> (Rules + Model) -> Hybrid Fusion -> JSON`
 
-The active repo default comes from [`default_config.json`](/home/saif/Projects/noise-robust-ocr-pipeline/default_config.json). CLI and Streamlit both use it automatically unless overridden.
-
-## Output Schema
-
-Final JSON always follows the normalized schema from [`src/receipt_ai/schemas.py`](/home/saif/Projects/noise-robust-ocr-pipeline/src/receipt_ai/schemas.py):
-
-```json
-{
-  "vendor": {
-    "name": "",
-    "registration_number": "",
-    "address": ""
-  },
-  "invoice": {
-    "invoice_type": "",
-    "bill_number": "",
-    "order_number": "",
-    "table_number": "",
-    "date": "",
-    "time": "",
-    "cashier": ""
-  },
-  "items": [
-    {
-      "name": "",
-      "quantity": 1.0,
-      "unit_price": 0.0,
-      "line_total": 0.0
-    }
-  ],
-  "totals": {
-    "subtotal": 0.0,
-    "service_charge": 0.0,
-    "tax": 0.0,
-    "rounding": 0.0,
-    "total": 0.0,
-    "currency": ""
-  },
-  "payment": {
-    "method": "",
-    "amount_paid": 0.0
-  },
-  "metadata": {
-    "mode": "easyocr_rules",
-    "source_image": "receipt.jpg",
-    "warnings": [],
-    "confidence": 0.0,
-    "field_confidences": {},
-    "field_provenance": {}
-  }
-}
+```mermaid
+flowchart LR
+    A[Receipt Image] --> B[EasyOCR]
+    B --> C[OCR Tokens + Lines]
+    C --> D[Rule-Based Parser]
+    C --> E[LayoutLMv3 Token Classifier]
+    D --> F[Rules Output]
+    E --> G[Model Output]
+    F --> H[Hybrid Fusion]
+    G --> H
+    H --> I[Normalized Receipt JSON]
 ```
 
-Output modes:
-- `full`: includes confidence and provenance when enabled
-- `minimal`: keeps the same top-level schema but strips confidence/provenance details
+### Runtime components
+
+- `src/receipt_ai/ocr/easyocr_engine.py`
+  - OCR extraction and token/line grouping
+- `src/receipt_ai/parsing/rules_parser.py`
+  - rules-based receipt parsing and normalization
+- `src/receipt_ai/model/inference.py`
+  - LayoutLMv3 checkpoint inference and decoded field extraction
+- `src/receipt_ai/pipelines/entrypoints.py`
+  - unified runtime entrypoints for all extraction modes
+- `src/receipt_ai/runtime/`
+  - default config, output formatting, runtime mode resolution
+
+## Modes Explained
+
+### `easyocr_rules`
+
+OCR + parser only.
+
+Use this when:
+
+- no valid checkpoint is available
+- you want the most transparent baseline
+- you want deterministic, rule-first extraction
+
+Strengths:
+
+- stable fallback
+- explainable behavior
+- no model dependency
+
+Weaknesses:
+
+- brittle on unusual layouts
+- semantic fields can be missed or mislabeled
+
+### `layoutlm_only`
+
+OCR + LayoutLMv3 only.
+
+Use this when:
+
+- evaluating checkpoint quality directly
+- testing model contribution without rules
+- benchmarking semantic extraction improvements
+
+Strengths:
+
+- layout-aware semantic extraction
+- better potential generalization than rules alone
+
+Weaknesses:
+
+- highly dependent on training quality
+- weak checkpoints often underperform rules
+
+### `hybrid`
+
+Runs both paths and fuses them using confidence and field-aware thresholds.
+
+Use this when:
+
+- the checkpoint is strong enough to contribute useful semantic corrections
+- you want the best production-oriented output
+
+Strengths:
+
+- preserves rule stability
+- uses the model when model evidence is strong
+- exposes per-field provenance and confidence in full output mode
+
+Weaknesses:
+
+- depends on checkpoint quality and threshold tuning
+- can still fall back to rules heavily if model predictions are weak
+
+## Project Structure
+
+```text
+.
+├── app.py
+├── run_receipt_ai.py
+├── default_config.json
+├── scripts/
+├── outputs/
+└── src/
+    └── receipt_ai/
+        ├── config.py
+        ├── schemas.py
+        ├── dataset_loader.py
+        ├── ocr/
+        ├── parsing/
+        ├── model/
+        ├── pipelines/
+        ├── runtime/
+        └── evaluation/
+```
+
+### Key directories
+
+- `src/receipt_ai/`
+  - main package for extraction, training, runtime config, and evaluation
+- `src/receipt_ai/ocr/`
+  - OCR engine and token/line extraction
+- `src/receipt_ai/parsing/`
+  - rules parser and normalization
+- `src/receipt_ai/model/`
+  - training, weak-label alignment, inference, decoding, metrics, checkpoint utilities
+- `src/receipt_ai/pipelines/`
+  - unified extraction entrypoints and batch runner
+- `src/receipt_ai/runtime/`
+  - active default config loading, deterministic runtime setup, output formatting
+- `src/receipt_ai/evaluation/`
+  - field comparison, disagreement analysis, error bucketing, improvement reporting
+- `scripts/`
+  - training, evaluation, comparison, ablation, diagnosis, checkpoint promotion, reporting
+- `outputs/`
+  - checkpoints, reports, comparisons, runtime policies, experiment artifacts
 
 ## Quickstart
 
-Install dependencies:
+### 1. Create environment
+
+This repo requires Python `3.10+`.
 
 ```bash
 python3.11 -m venv .venv
@@ -121,42 +197,130 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Python 3.10+ is required. This repo uses `dataclass(slots=True)` and should be run with `python3.10+` or `python3.11`.
+### 2. Finalize the active default config
 
-Run one receipt with the default config:
+This reads runtime artifacts and writes `default_config.json`.
+
+```bash
+python3.11 scripts/finalize_default_config_receipt_ai.py
+```
+
+### 3. Run extraction on one image
 
 ```bash
 python3.11 run_receipt_ai.py path/to/receipt.jpg
 ```
 
-Save JSON to a file:
+Save the result:
 
 ```bash
 python3.11 run_receipt_ai.py path/to/receipt.jpg --output outputs/demo_receipt.json
 ```
 
-Run a folder:
+Run on a folder:
 
 ```bash
-python3.11 run_receipt_ai.py path/to/receipt_folder --output outputs/demo_batch
+python3.11 run_receipt_ai.py path/to/receipts --output outputs/demo_batch
 ```
 
-## Streamlit App
-
-Run:
+### 4. Launch the Streamlit demo
 
 ```bash
 streamlit run app.py
 ```
 
-The app:
-- loads [`default_config.json`](/home/saif/Projects/noise-robust-ocr-pipeline/default_config.json) automatically
-- shows the selected mode, effective mode, checkpoint used, and fallback behavior
-- allows manual override of mode, checkpoint, and output verbosity
+## Usage Examples
 
-## Training
+### CLI example
 
-Short training run:
+```bash
+python3.11 run_receipt_ai.py data/sample_receipts/receipt_01.jpg --output-mode full
+```
+
+### Override mode or checkpoint
+
+```bash
+python3.11 run_receipt_ai.py data/sample_receipts/receipt_01.jpg \
+  --mode hybrid \
+  --checkpoint outputs/layoutlmv3_receipt_ai/smoke_richer_run
+```
+
+### Minimal output example
+
+```json
+{
+  "vendor": {
+    "name": "ABC STORE SDN BHD",
+    "registration_number": "",
+    "address": "NO 12 JALAN MAJU"
+  },
+  "invoice": {
+    "invoice_type": "",
+    "bill_number": "B12345",
+    "order_number": "",
+    "table_number": "",
+    "date": "2018-03-14",
+    "time": "13:42",
+    "cashier": ""
+  },
+  "items": [
+    {
+      "name": "MINERAL WATER",
+      "quantity": 2.0,
+      "unit_price": 1.50,
+      "line_total": 3.00
+    }
+  ],
+  "totals": {
+    "subtotal": 10.50,
+    "service_charge": 0.0,
+    "tax": 0.60,
+    "rounding": 0.0,
+    "total": 11.10,
+    "currency": ""
+  },
+  "payment": {
+    "method": "CASH",
+    "amount_paid": 20.0
+  },
+  "metadata": {
+    "mode": "hybrid",
+    "source_image": "receipt_01.jpg",
+    "warnings": []
+  }
+}
+```
+
+## Training Pipeline
+
+The model training stack is designed for weak supervision, not just clean fully labeled data.
+
+### Training flow
+
+1. Load receipt samples and OCR structure
+2. Generate pseudo-labels from parser-aligned fields
+3. Filter noisy spans and contradictory BIO labels
+4. Weight labels by pseudo-label confidence
+5. Upweight critical fields such as:
+   - vendor
+   - date
+   - total
+6. Train LayoutLMv3 token classifier
+7. Save diagnostics and checkpoint artifacts
+
+### Weak-label strategy
+
+Implemented improvements include:
+
+- noisy pseudo-label filtering
+- contradictory BIO cleanup
+- hard-negative reduction
+- confidence-aware supervision
+- critical label boosting
+- item-label stabilization
+- diagnostics for label distribution and sample filtering
+
+### Example training command
 
 ```bash
 python3.11 scripts/train_receipt_ai_layoutlmv3.py \
@@ -164,7 +328,6 @@ python3.11 scripts/train_receipt_ai_layoutlmv3.py \
   --model-name microsoft/layoutlmv3-base \
   --output-dir outputs/layoutlmv3_receipt_ai \
   --experiment-name smoke_richer_run \
-  --smoke \
   --loss-type focal \
   --focal-gamma 2.0 \
   --use-class-weights \
@@ -174,9 +337,30 @@ python3.11 scripts/train_receipt_ai_layoutlmv3.py \
   --weak-label-floor 0.40
 ```
 
-## Experiment Cycle
+### Important training flags
 
-Full baseline vs improved experiment:
+- `--loss-type focal`
+  - improves learning under class imbalance
+- `--use-class-weights`
+  - upweights rare labels
+- `--oversample-non-o`
+  - improves signal from non-background tokens
+- `--drop-noisy-samples`
+  - removes weak-label outliers
+- `--critical-label-boost`
+  - prioritizes key semantic fields
+- `--weak-label-floor`
+  - prevents very low-confidence pseudo-labels from dominating training
+
+## Experiment Workflow
+
+This repo is built around an experiment loop, not ad hoc trial-and-error.
+
+### Workflow
+
+`Train -> Evaluate -> Compare -> Diagnose -> Improve -> Re-evaluate`
+
+### Full experiment cycle
 
 ```bash
 python3.11 scripts/run_receipt_ai_experiment_cycle.py \
@@ -192,54 +376,114 @@ python3.11 scripts/run_receipt_ai_experiment_cycle.py \
   --epochs 1
 ```
 
-Postmortem on an experiment folder:
+### Post-experiment diagnosis
 
 ```bash
 python3.11 scripts/run_experiment_postmortem_receipt_ai.py \
   --experiment-root outputs/experiments/improved_vs_baseline_val
 ```
 
-Finalize repo default config after reviewing artifacts:
+### Generated artifacts
 
-```bash
-python3.11 scripts/finalize_default_config_receipt_ai.py
-```
+Examples of produced outputs:
 
-## Demo Flow
+- `training/checkpoints/...`
+- `training/weak_label_analysis/...`
+- `baseline/eval/metrics.json`
+- `improved/eval/metrics.json`
+- `baseline/comparison/comparison_<split>.json`
+- `improved/comparison/comparison_<split>.json`
+- `ablation/policy_ablation_report.json`
+- `report/experiment_summary.json`
+- `report/experiment_summary.md`
+- `report/failure_cases.json`
+- `diagnosis/diagnosis_report.json`
+- `diagnosis/next_step_recommendations.json`
+- `diagnosis/checkpoint_promotion_decision.json`
 
-Minimal local demo:
+## Results & Insights
 
-```bash
-python3.11 run_receipt_ai.py outputs/tmp_test/dummy.jpg --output-mode minimal
-```
+This system was designed to answer practical questions, not just optimize one validation metric.
 
-If you want the same image in Streamlit:
+### What the experiments are meant to show
+
+- whether the improved checkpoint actually beats baseline
+- whether hybrid is better than rules-only and model-only
+- whether model contribution increases for critical fields
+- whether regressions are concentrated in specific sample types
+- whether the checkpoint is good enough to promote to a runtime default
+
+### Main engineering insights from the project
+
+- Rules are often strong baselines for totals and constrained numeric fields.
+- The model helps most when semantic structure matters more than surface text patterns.
+- Hybrid extraction is only useful when the model is trusted selectively.
+- Weak-label quality is often the main bottleneck, not model architecture.
+- Item extraction is consistently harder than vendor/date/total extraction.
+
+## Limitations
+
+- Weak supervision quality depends heavily on parser-generated pseudo-labels.
+- SROIE is useful but limited for richer-schema receipt extraction.
+- Item extraction remains one of the hardest parts of the task.
+- OCR quality directly affects both rules and model performance.
+- Hybrid mode can still collapse to rules if the checkpoint is weak or thresholds are conservative.
+
+## Future Improvements
+
+- Improve weak-label precision for vendor/date/total and item spans
+- Add stronger or larger receipt-specific checkpoints
+- Expand evaluation with more diverse annotated receipt data
+- Improve item grouping and quantity/price matching
+- Add packaging for API/service deployment
+- Add dataset and checkpoint versioning for cleaner reproducibility
+
+## Demo / UI
+
+The project includes a Streamlit interface for interactive demos and manual inspection.
+
+Run:
 
 ```bash
 streamlit run app.py
 ```
 
-## Legacy Modules
+The UI lets you:
 
-These are retained only as deprecated compatibility paths and should not be used for new work:
-- [`src/app/extraction_modes.py`](/home/saif/Projects/noise-robust-ocr-pipeline/src/app/extraction_modes.py)
-- [`src/app/extract_fields.py`](/home/saif/Projects/noise-robust-ocr-pipeline/src/app/extract_fields.py)
-- [`src/app/text_cleaning.py`](/home/saif/Projects/noise-robust-ocr-pipeline/src/app/text_cleaning.py)
-- [`src/app/receipt_script_parser.py`](/home/saif/Projects/noise-robust-ocr-pipeline/src/app/receipt_script_parser.py)
-- [`src/layoutlmv3_engine.py`](/home/saif/Projects/noise-robust-ocr-pipeline/src/layoutlmv3_engine.py)
-- [`infer_layoutlmv3_receipt.py`](/home/saif/Projects/noise-robust-ocr-pipeline/infer_layoutlmv3_receipt.py)
+- upload a receipt image
+- choose extraction mode
+- override checkpoint path manually
+- see the effective mode and fallback behavior
+- inspect vendor, invoice, totals, payment, items, and metadata
+- download the final JSON output
 
-## Limitations
+## Contributing
 
-- Weak labels remain a bottleneck for model quality.
-- SROIE supervision is limited and does not cover all richer-schema fields equally well.
-- Item coherence analysis is heuristic rather than gold-labeled.
-- Hybrid quality depends on checkpoint quality and threshold tuning.
-- Default mode may remain rules-first when experiment evidence is too weak to promote a model-heavy default.
+Contributions are welcome if they keep the project focused and practical.
 
-## Future Work
+Suggested contribution areas:
 
-- Improve weak-label precision on vendor/date/total and item spans.
-- Expand evaluation beyond SROIE-style supervision.
-- Strengthen item decoding and fusion decisions with more labeled evidence.
-- Promote a stronger checkpoint once experiment evidence is large enough and stable enough to justify it.
+- receipt-specific data quality improvements
+- model and decoder improvements
+- better error analysis tooling
+- packaging and deployment support
+- stronger test coverage around parser/fusion behavior
+
+## Author / Contact
+
+Built as a production-style document AI / receipt extraction project for demonstrating:
+
+- OCR system design
+- hybrid ML + rules engineering
+- LayoutLMv3 training and evaluation
+- experiment-driven model improvement
+- practical ML tooling and developer UX
+
+If you want this README tailored further for:
+
+- GitHub portfolio presentation
+- Upwork proposal use
+- academic/project showcase
+- recruiter-facing summary
+
+you can adapt the top sections and results narrative depending on the audience.
