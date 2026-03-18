@@ -18,6 +18,8 @@ from src.evaluate import normalize_text
 from src.layoutlmv3_engine import predict_layoutlmv3_from_easyocr, predict_layoutlmv3_with_hybrid
 from src.ocr_engine import run_easyocr
 from src.preprocess import candidate_modes_for_auto, preprocess_for_ocr
+from src.receipt_ai.model.compatibility import inspect_checkpoint_label_space
+from src.receipt_ai.runtime.policy import load_runtime_policy
 
 
 def to_jsonable(value):
@@ -93,8 +95,12 @@ with st.sidebar:
     show_raw = st.checkbox("Show raw OCR text", value=True)
     show_debug = st.checkbox("Show debug", value=False)
 
+    runtime_policy = load_runtime_policy()
+
     st.divider()
-    default_layout_checkpoint = "outputs/layoutlmv3_sroie"
+    default_layout_checkpoint = runtime_policy.preferred_checkpoint or "outputs/layoutlmv3_sroie"
+    if default_layout_checkpoint and not Path(default_layout_checkpoint).expanduser().exists():
+        default_layout_checkpoint = "outputs/layoutlmv3_sroie"
     if not Path(default_layout_checkpoint).exists():
         default_layout_checkpoint = "microsoft/layoutlmv3-base"
 
@@ -104,6 +110,13 @@ with st.sidebar:
         value=default_layout_checkpoint,
         help="Use a fine-tuned receipt KIE checkpoint. Base model is not suitable for extraction.",
     )
+
+    st.divider()
+    st.header("Runtime Policy")
+    st.caption(f"Default mode: {runtime_policy.default_mode}")
+    st.caption(f"Fallback mode: {runtime_policy.fallback_mode_on_model_failure}")
+    if runtime_policy.preferred_checkpoint:
+        st.caption(f"Preferred checkpoint: {runtime_policy.preferred_checkpoint}")
 
     st.divider()
     st.header("About")
@@ -164,16 +177,52 @@ if uploaded:
 
     # Mode selection
     st.subheader("Extraction Mode")
+    mode_options = ["EasyOCR + Rules", "LayoutLMv3 Only", "Hybrid Extraction"]
+    default_mode_label_map = {
+        "easyocr_rules": "EasyOCR + Rules",
+        "layoutlm_only": "LayoutLMv3 Only",
+        "hybrid": "Hybrid Extraction",
+    }
+    default_mode_label = default_mode_label_map.get(runtime_policy.default_mode, "Hybrid Extraction")
+    default_mode_index = mode_options.index(default_mode_label) if default_mode_label in mode_options else 2
+
     selected_mode = st.radio(
         "Choose extraction method:",
-        options=["EasyOCR + Rules", "LayoutLMv3 Only", "Hybrid Extraction"],
+        options=mode_options,
+        index=default_mode_index,
         horizontal=True,
     )
+
+    effective_selected_mode = selected_mode
+    model_mode_selected = selected_mode in {"LayoutLMv3 Only", "Hybrid Extraction"}
+    if model_mode_selected:
+        ckpt_path = Path(layout_model_path).expanduser()
+        fallback_label = default_mode_label_map.get(runtime_policy.fallback_mode_on_model_failure, "EasyOCR + Rules")
+        if not ckpt_path.exists() and layout_model_path != "microsoft/layoutlmv3-base":
+            st.warning(
+                f"Configured checkpoint is missing: {ckpt_path}. Falling back to {fallback_label}."
+            )
+            effective_selected_mode = fallback_label
+        elif ckpt_path.exists():
+            compatibility = inspect_checkpoint_label_space(ckpt_path)
+            if (not compatibility.is_compatible) and (not compatibility.is_legacy):
+                st.warning(
+                    f"Checkpoint incompatible: {compatibility.message} Falling back to {fallback_label}."
+                )
+                effective_selected_mode = fallback_label
+            elif compatibility.is_legacy and not runtime_policy.allow_legacy_checkpoint:
+                st.warning(
+                    "Checkpoint is legacy/reduced-schema and legacy usage is disabled by runtime policy. "
+                    f"Falling back to {fallback_label}."
+                )
+                effective_selected_mode = fallback_label
+            elif compatibility.is_legacy:
+                st.info("Legacy checkpoint detected; richer-schema fields may be limited.")
 
     # ===========================================================================
     # MODE 1: EASYOCR + RULES
     # ===========================================================================
-    if selected_mode == "EasyOCR + Rules":
+    if effective_selected_mode == "EasyOCR + Rules":
         st.subheader("EasyOCR + Rules Mode")
 
         # Editable text area for user corrections
@@ -241,7 +290,7 @@ if uploaded:
     # ===========================================================================
     # MODE 2: LAYOUTLMV3 ONLY
     # ===========================================================================
-    elif selected_mode == "LayoutLMv3 Only":
+    elif effective_selected_mode == "LayoutLMv3 Only":
         st.subheader("LayoutLMv3 Only Mode (Pure Model)")
 
         run_layout = st.button("🚀 Run LayoutLMv3 Inference", key="run_layoutlmv3_only")
@@ -323,7 +372,7 @@ if uploaded:
     # ===========================================================================
     # MODE 3: HYBRID
     # ===========================================================================
-    elif selected_mode == "Hybrid Extraction":
+    elif effective_selected_mode == "Hybrid Extraction":
         st.subheader("Hybrid Mode (Model + Parser + Fusion)")
 
         run_hybrid = st.button("🚀 Run Hybrid Extraction", key="run_hybrid")
@@ -443,6 +492,7 @@ if uploaded:
             {
                 "file": uploaded.name,
                 "mode": selected_mode,
+                "effective_mode": effective_selected_mode,
                 "timestamp": pd.Timestamp.now(),
             }
         )
