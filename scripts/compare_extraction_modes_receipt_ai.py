@@ -66,6 +66,11 @@ def parse_args() -> argparse.Namespace:
         help="Root directory for SROIE dataset",
     )
     parser.add_argument(
+        "--checkpoint",
+        default="",
+        help="Optional fine-tuned checkpoint for layoutlm_only and hybrid modes",
+    )
+    parser.add_argument(
         "--strict",
         action="store_true",
         help="Fail on first error instead of collecting all",
@@ -107,6 +112,8 @@ def main() -> None:
     args = parse_args()
     cfg = ReceiptAIConfig.from_env()
     cfg.paths.data_root = Path(args.dataset_root).expanduser().resolve()
+    if args.checkpoint:
+        cfg.paths.model_checkpoint = Path(args.checkpoint).expanduser().resolve()
     
     # Prepare output dir
     output_dir = Path(args.output_dir).expanduser().resolve()

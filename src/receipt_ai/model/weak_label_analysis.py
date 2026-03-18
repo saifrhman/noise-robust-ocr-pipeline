@@ -73,10 +73,15 @@ def analyze_split(
     key_missing_counts: Counter[str] = Counter()
     field_source_counts: dict[str, Counter[str]] = {entity: Counter() for entity in ENTITY_NAMES}
     item_coverage: Counter[str] = Counter()
+    filtering_summary: Counter[str] = Counter()
+    drop_reasons: Counter[str] = Counter()
     suspicious_samples: list[dict[str, Any]] = []
 
     samples_analyzed = 0
     pseudo_only_samples = 0
+    dropped_candidate_samples = 0
+    label_confidence_sum = 0.0
+    label_confidence_count = 0
 
     for sample in loader.iter_samples(split, val_ratio=val_ratio, seed=seed, strict=strict):
         if max_samples > 0 and samples_analyzed >= max_samples:
@@ -85,6 +90,15 @@ def analyze_split(
         weak = build_weak_bio_labels(sample)
         labels = weak.labels
         label_counts.update(labels)
+        filtering_summary.update({key: int(value) for key, value in weak.filtering_summary.items()})
+        if weak.drop_training_sample:
+            dropped_candidate_samples += 1
+            drop_reasons[weak.drop_reason or "unspecified"] += 1
+        for label, weight in zip(weak.labels, weak.label_confidences):
+            if label == "O":
+                continue
+            label_confidence_sum += float(weight)
+            label_confidence_count += 1
 
         has_vendor = _has_entity(labels, "VENDOR_NAME")
         has_date = _has_entity(labels, "DATE")
@@ -128,12 +142,16 @@ def analyze_split(
             reasons.append("item_spans_without_prices")
 
         if reasons:
+            if weak.drop_training_sample and weak.drop_reason:
+                reasons.append(f"drop_candidate:{weak.drop_reason}")
             suspicious_samples.append(
                 {
                     "sample_id": sample.sample_id,
                     "reasons": reasons,
                     "target_sources": weak.target_sources,
                     "item_summary": weak.item_summary,
+                    "filtering_summary": weak.filtering_summary,
+                    "sample_quality": weak.sample_quality,
                     "label_counts": {
                         "ITEM_NAME": item_name_count,
                         "ITEM_QTY": item_qty_count,
@@ -154,6 +172,10 @@ def analyze_split(
         "key_missing_counts": dict(key_missing_counts),
         "field_source_counts": {entity: dict(counter) for entity, counter in field_source_counts.items() if counter},
         "item_coverage": dict(item_coverage),
+        "filtering_summary": dict(sorted(filtering_summary.items())),
+        "drop_candidate_samples": dropped_candidate_samples,
+        "drop_reasons": dict(sorted(drop_reasons.items())),
+        "avg_non_o_confidence": float(label_confidence_sum / label_confidence_count) if label_confidence_count else 0.0,
         "token_distribution": {
             "total_tokens": total_tokens,
             "o_tokens": int(label_counts.get("O", 0)),

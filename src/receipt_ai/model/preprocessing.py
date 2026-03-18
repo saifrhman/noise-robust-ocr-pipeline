@@ -55,6 +55,28 @@ def align_word_labels_to_tokens(word_ids: list[int | None], word_labels: list[in
     return token_labels
 
 
+def align_word_values_to_tokens(
+    word_ids: list[int | None],
+    word_values: list[float],
+    *,
+    pad_value: float = 0.0,
+) -> list[float]:
+    """Align generic per-word float values to first-subword tokens only."""
+    token_values: list[float] = []
+    previous_word_id: int | None = None
+    for word_id in word_ids:
+        if word_id is None or word_id >= len(word_values):
+            token_values.append(float(pad_value))
+            previous_word_id = word_id
+            continue
+        if previous_word_id != word_id:
+            token_values.append(float(word_values[word_id]))
+        else:
+            token_values.append(float(pad_value))
+        previous_word_id = word_id
+    return token_values
+
+
 def _processor_encode(
     processor: Any,
     image: Image.Image,
@@ -84,6 +106,7 @@ def prepare_training_feature(
     words: list[str],
     boxes_1000: list[list[int]],
     word_labels: list[int],
+    word_label_weights: list[float] | None = None,
     *,
     max_length: int = 512,
 ) -> dict[str, Any]:
@@ -91,11 +114,13 @@ def prepare_training_feature(
     encoding = _processor_encode(processor, image=image, words=words, boxes=boxes_1000, max_length=max_length)
     word_ids = encoding.word_ids(batch_index=0)
     labels = align_word_labels_to_tokens(word_ids, word_labels)
+    label_weights = align_word_values_to_tokens(word_ids, word_label_weights or [1.0] * len(word_labels), pad_value=0.0)
 
     out: dict[str, Any] = {}
     for key, value in encoding.items():
         out[key] = value.squeeze(0)
     out["labels"] = torch.tensor(labels, dtype=torch.long)
+    out["label_weights"] = torch.tensor(label_weights, dtype=torch.float)
     return out
 
 

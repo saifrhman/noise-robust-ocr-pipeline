@@ -23,6 +23,8 @@ ENTITY_NAMES: list[str] = [
     "PAYMENT_METHOD",
 ]
 
+CRITICAL_ENTITY_NAMES: list[str] = ["VENDOR_NAME", "DATE", "TOTAL"]
+
 SEMANTIC_BIO_LABELS: list[str] = ["O"] + [f"{prefix}-{entity}" for entity in ENTITY_NAMES for prefix in ("B", "I")]
 LABEL2ID: dict[str, int] = {label: idx for idx, label in enumerate(SEMANTIC_BIO_LABELS)}
 ID2LABEL: dict[int, str] = {idx: label for label, idx in LABEL2ID.items()}
@@ -95,6 +97,13 @@ def split_bio(label: str) -> tuple[str, str]:
     if normalized == "O":
         return "O", "O"
     return normalized[:1], normalized[2:]
+
+
+def entity_from_label(label: str) -> str:
+    normalized = normalize_model_label(label)
+    if normalized == "O":
+        return "O"
+    return normalized[2:]
 
 
 def sanitize_labels(labels: Iterable[str]) -> list[str]:

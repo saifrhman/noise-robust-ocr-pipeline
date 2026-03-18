@@ -5,6 +5,8 @@ from typing import Any
 
 import evaluate
 
+from src.receipt_ai.model.labels import CRITICAL_ENTITY_NAMES, entity_from_label
+
 
 def compute_token_classification_metrics(
     gold_sequences: list[list[str]],
@@ -18,12 +20,19 @@ def compute_token_classification_metrics(
     label_tp: Counter[str] = Counter()
     label_fp: Counter[str] = Counter()
     label_fn: Counter[str] = Counter()
+    pred_label_counts: Counter[str] = Counter()
+    gold_label_counts: Counter[str] = Counter()
+    entity_tp: Counter[str] = Counter()
+    entity_fp: Counter[str] = Counter()
+    entity_fn: Counter[str] = Counter()
 
     for gold_row, pred_row in zip(gold_sequences, pred_sequences):
         for gold, pred in zip(gold_row, pred_row):
             total += 1
             if gold == pred:
                 correct += 1
+            pred_label_counts[pred] += 1
+            gold_label_counts[gold] += 1
             if pred == gold and pred != "O":
                 label_tp[pred] += 1
             elif pred != gold:
@@ -31,6 +40,16 @@ def compute_token_classification_metrics(
                     label_fp[pred] += 1
                 if gold != "O":
                     label_fn[gold] += 1
+
+            gold_entity = entity_from_label(gold)
+            pred_entity = entity_from_label(pred)
+            if gold_entity == pred_entity and gold_entity != "O":
+                entity_tp[gold_entity] += 1
+            elif gold_entity != pred_entity:
+                if pred_entity != "O":
+                    entity_fp[pred_entity] += 1
+                if gold_entity != "O":
+                    entity_fn[gold_entity] += 1
 
     per_label: dict[str, dict[str, float]] = {}
     all_labels = sorted(set(label_tp) | set(label_fp) | set(label_fn))
@@ -48,6 +67,29 @@ def compute_token_classification_metrics(
             "support": tp + fn,
         }
 
+    per_entity: dict[str, dict[str, float]] = {}
+    all_entities = sorted(set(entity_tp) | set(entity_fp) | set(entity_fn))
+    for entity in all_entities:
+        tp = float(entity_tp[entity])
+        fp = float(entity_fp[entity])
+        fn = float(entity_fn[entity])
+        precision = tp / (tp + fp) if tp + fp > 0 else 0.0
+        recall = tp / (tp + fn) if tp + fn > 0 else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if precision + recall > 0 else 0.0
+        per_entity[entity] = {
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "support": tp + fn,
+            "predicted_tokens": int(pred_label_counts.get(f"B-{entity}", 0) + pred_label_counts.get(f"I-{entity}", 0)),
+            "gold_tokens": int(gold_label_counts.get(f"B-{entity}", 0) + gold_label_counts.get(f"I-{entity}", 0)),
+        }
+
+    prediction_frequency = {
+        label: float(count / total) if total > 0 else 0.0 for label, count in sorted(pred_label_counts.items())
+    }
+    critical_fields = {entity: per_entity.get(entity, {"precision": 0.0, "recall": 0.0, "f1": 0.0, "support": 0.0}) for entity in CRITICAL_ENTITY_NAMES}
+
     return {
         "token_accuracy": float(correct / total) if total > 0 else 0.0,
         "precision": float(seqeval_result.get("overall_precision", 0.0)),
@@ -55,4 +97,7 @@ def compute_token_classification_metrics(
         "f1": float(seqeval_result.get("overall_f1", 0.0)),
         "overall_accuracy": float(seqeval_result.get("overall_accuracy", 0.0)),
         "per_label": per_label,
+        "per_entity": per_entity,
+        "critical_fields": critical_fields,
+        "prediction_frequency": prediction_frequency,
     }

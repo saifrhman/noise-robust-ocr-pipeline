@@ -6,46 +6,93 @@ from typing import Iterable
 
 from src.receipt_ai.parsing.rules_parser import RuleBasedReceiptParser
 from src.receipt_ai.schemas import OCRLine, OCRToken, ReceiptItem, ReceiptSample
-from .labels import split_bio
+from .labels import CRITICAL_ENTITY_NAMES, split_bio
 
 
 @dataclass(slots=True)
 class WeakLabelingResult:
     labels: list[str]
+    label_confidences: list[float]
     assumptions: list[str]
     target_values: dict[str, str]
     target_sources: dict[str, str]
     item_summary: dict[str, int]
+    filtering_summary: dict[str, int]
+    sample_quality: dict[str, float | int | bool | str]
+    drop_training_sample: bool = False
+    drop_reason: str = ""
+
+
+@dataclass(slots=True)
+class SpanProposal:
+    start: int
+    end: int
+    entity: str
+    confidence: float
+    source: str
+    reason: str
+
+
+FIELD_BASE_CONFIDENCE: dict[str, float] = {
+    "gold_sroie": 1.0,
+    "pseudo_rules": 0.72,
+}
+
+ENTITY_CONFIDENCE_ADJUSTMENT: dict[str, float] = {
+    "VENDOR_NAME": 0.12,
+    "ADDRESS": 0.08,
+    "DATE": 0.12,
+    "TOTAL": 0.14,
+    "SUBTOTAL": -0.02,
+    "TAX": -0.04,
+    "ITEM_NAME": -0.10,
+    "ITEM_QTY": -0.06,
+    "ITEM_PRICE": -0.02,
+}
+
+NOISY_SAMPLE_MAX_LABELED_RATIO = 0.45
+NOISY_SAMPLE_MIN_LABELED_RATIO = 0.01
+MIN_PSEUDO_SPAN_CONFIDENCE = 0.45
 
 
 def build_weak_bio_labels(sample: ReceiptSample) -> WeakLabelingResult:
     """
-    Build practical weak BIO labels for training from SROIE annotations + parser output.
+    Build weak BIO labels with filtering and confidence weighting.
 
-    Assumptions:
-    - SROIE provides gold `company`, `address`, `date`, `total` only.
-    - Other fields are pseudo-labeled from the rule parser.
-    - Item fields are line-aware pseudo labels derived from parser output.
+    The returned supervision is still compatible with current training code:
+    - labels carry the discrete BIO targets
+    - label_confidences carry per-token supervision strength
+    - drop_training_sample flags severely noisy examples
     """
     parser = RuleBasedReceiptParser()
     parsed = parser.parse(sample.ocr_lines, source_image=sample.image_path, mode="weak_labeling")
 
     labels = ["O"] * len(sample.ocr_tokens)
+    label_confidences = [1.0] * len(sample.ocr_tokens)
     assumptions: list[str] = [
         "Ground truth token labels are not provided directly in SROIE.",
         "company/address/date/total use dataset annotations when available.",
         "remaining fields are pseudo-labeled from the rule parser.",
-        "item labels are assigned with line-aware heuristics.",
+        "low-confidence or contradictory pseudo spans are filtered before training.",
     ]
 
     target_values: dict[str, str] = {}
     target_sources: dict[str, str] = {}
+    filtering_summary: dict[str, int] = {
+        "spans_written": 0,
+        "spans_filtered_low_confidence": 0,
+        "spans_filtered_unreliable": 0,
+        "spans_filtered_overlap": 0,
+        "spans_filtered_ambiguous": 0,
+        "spans_filtered_item_noise": 0,
+        "spans_filtered_contradiction": 0,
+        "tokens_labeled": 0,
+        "tokens_downweighted": 0,
+    }
 
     def add_target(entity: str, value: str, source: str) -> None:
         text = (value or "").strip()
-        if not text:
-            return
-        if entity in target_values:
+        if not text or entity in target_values:
             return
         target_values[entity] = text
         target_sources[entity] = source
@@ -57,7 +104,6 @@ def build_weak_bio_labels(sample: ReceiptSample) -> WeakLabelingResult:
         if sample.ground_truth.totals.total > 0:
             add_target("TOTAL", f"{sample.ground_truth.totals.total:.2f}", "gold_sroie")
 
-    # Pseudo-label missing fields from parser output.
     add_target("REG_NO", parsed.vendor.registration_number, "pseudo_rules")
     add_target("INVOICE_TYPE", parsed.invoice.invoice_type, "pseudo_rules")
     add_target("BILL_NO", parsed.invoice.bill_number, "pseudo_rules")
@@ -72,16 +118,46 @@ def build_weak_bio_labels(sample: ReceiptSample) -> WeakLabelingResult:
     add_target("PAYMENT_METHOD", parsed.payment.method, "pseudo_rules")
 
     line_to_indexes = _line_to_indexes(sample.ocr_tokens)
-    _label_scalar_fields(sample.ocr_lines, sample.ocr_tokens, labels, target_values, line_to_indexes)
-    item_summary = _label_item_fields(sample.ocr_lines, sample.ocr_tokens, labels, parsed.items, line_to_indexes)
+    _label_scalar_fields(
+        sample.ocr_lines,
+        sample.ocr_tokens,
+        labels,
+        label_confidences,
+        target_values,
+        target_sources,
+        line_to_indexes,
+        filtering_summary,
+    )
+    item_summary = _label_item_fields(
+        sample.ocr_lines,
+        sample.ocr_tokens,
+        labels,
+        label_confidences,
+        parsed.items,
+        line_to_indexes,
+        filtering_summary,
+    )
     _enforce_valid_bio(labels)
+
+    tokens_labeled = sum(1 for label in labels if label != "O")
+    filtering_summary["tokens_labeled"] = tokens_labeled
+    filtering_summary["tokens_downweighted"] = sum(
+        1 for label, weight in zip(labels, label_confidences) if label != "O" and weight < 0.999
+    )
+    sample_quality = _build_sample_quality(labels, label_confidences, target_sources, filtering_summary, item_summary)
+    drop_training_sample, drop_reason = _should_drop_sample(sample_quality)
 
     return WeakLabelingResult(
         labels=labels,
+        label_confidences=label_confidences,
         assumptions=assumptions,
         target_values=target_values,
         target_sources=target_sources,
         item_summary=item_summary,
+        filtering_summary=filtering_summary,
+        sample_quality=sample_quality,
+        drop_training_sample=drop_training_sample,
+        drop_reason=drop_reason,
     )
 
 
@@ -94,11 +170,8 @@ def _normalize_token(text: str) -> str:
 def _token_equivalent(left: str, right: str) -> bool:
     if left == right:
         return True
-    if not left or not right:
+    if not left or not right or len(left) != len(right):
         return False
-    if len(left) != len(right):
-        return False
-    # Failure-driven fix: restrict OCR fuzzy equivalence to common single-char confusions.
     confusion_pairs = {("0", "O"), ("O", "0"), ("1", "I"), ("I", "1"), ("5", "S"), ("S", "5")}
     mismatches = 0
     for lch, rch in zip(left, right):
@@ -108,7 +181,6 @@ def _token_equivalent(left: str, right: str) -> bool:
             mismatches += 1
             continue
         return False
-    # Allow at most one OCR-style mismatch to avoid broad false-positive matching.
     return mismatches <= 1
 
 
@@ -117,15 +189,22 @@ def _phrase_to_tokens(text: str) -> list[str]:
 
 
 def _can_write_span(labels: list[str], start: int, end: int) -> bool:
-    return all(label == "O" for label in labels[start:end])
+    return start < end and all(label == "O" for label in labels[start:end])
 
 
-def _write_span(labels: list[str], start: int, end: int, entity: str) -> None:
-    if start >= end:
-        return
+def _write_span(
+    labels: list[str],
+    label_confidences: list[float],
+    start: int,
+    end: int,
+    entity: str,
+    confidence: float,
+) -> None:
     labels[start] = f"B-{entity}"
+    label_confidences[start] = confidence
     for idx in range(start + 1, end):
         labels[idx] = f"I-{entity}"
+        label_confidences[idx] = confidence
 
 
 def _find_spans(tokens: list[OCRToken], phrase_tokens: list[str]) -> list[tuple[int, int]]:
@@ -154,8 +233,11 @@ def _label_scalar_fields(
     lines: list[OCRLine],
     tokens: list[OCRToken],
     labels: list[str],
+    label_confidences: list[float],
     target_values: dict[str, str],
+    target_sources: dict[str, str],
     line_to_indexes: dict[int, list[int]],
+    filtering_summary: dict[str, int],
 ) -> None:
     line_biased_entities = {"BILL_NO", "ORDER_NO", "TABLE_NO", "TIME", "CASHIER", "SUBTOTAL", "TAX", "PAYMENT_METHOD"}
     for entity, value in target_values.items():
@@ -163,31 +245,41 @@ def _label_scalar_fields(
         if not phrase_tokens:
             continue
         if not _entity_value_is_reliable(entity, phrase_tokens, value):
+            filtering_summary["spans_filtered_unreliable"] += 1
             continue
 
-        # Prefer line-local exact/fuzzy alignment for header-like and totals-like fields.
+        proposals: list[SpanProposal] = []
         if entity in line_biased_entities:
-            if _label_from_line_context(lines, tokens, labels, phrase_tokens, entity, line_to_indexes):
-                continue
-
-        spans = _find_spans(tokens, phrase_tokens)
-        if len(phrase_tokens) == 1 and len(spans) > 3:
-            # Failure-driven fix: skip highly ambiguous single-token assignments.
+            proposals.extend(
+                _line_context_proposals(
+                    lines,
+                    tokens,
+                    phrase_tokens,
+                    entity,
+                    line_to_indexes,
+                    source=target_sources.get(entity, "pseudo_rules"),
+                )
+            )
+        proposals.extend(_global_proposals(tokens, phrase_tokens, entity, source=target_sources.get(entity, "pseudo_rules")))
+        if len(phrase_tokens) == 1 and len(proposals) > 3:
+            filtering_summary["spans_filtered_ambiguous"] += 1
             continue
-        for start, end in spans:
-            if _can_write_span(labels, start, end):
-                _write_span(labels, start, end, entity)
-                break
+        if not proposals:
+            continue
+        best = sorted(proposals, key=lambda proposal: proposal.confidence, reverse=True)[0]
+        _try_apply_proposal(best, tokens, labels, label_confidences, filtering_summary)
 
 
-def _label_from_line_context(
+def _line_context_proposals(
     lines: list[OCRLine],
     tokens: list[OCRToken],
-    labels: list[str],
     phrase_tokens: list[str],
     entity: str,
     line_to_indexes: dict[int, list[int]],
-) -> bool:
+    *,
+    source: str,
+) -> list[SpanProposal]:
+    proposals: list[SpanProposal] = []
     for line in lines:
         idxs = line_to_indexes.get(line.line_id, [])
         if not idxs:
@@ -200,10 +292,88 @@ def _label_from_line_context(
                 continue
             start = idxs[rel]
             end = idxs[rel + window - 1] + 1
-            if _can_write_span(labels, start, end):
-                _write_span(labels, start, end, entity)
-                return True
-    return False
+            confidence = _proposal_confidence(entity, source, exact=True, line_local=True)
+            proposals.append(
+                SpanProposal(
+                    start=start,
+                    end=end,
+                    entity=entity,
+                    confidence=confidence,
+                    source=source,
+                    reason="line_context",
+                )
+            )
+    return proposals
+
+
+def _global_proposals(
+    tokens: list[OCRToken],
+    phrase_tokens: list[str],
+    entity: str,
+    *,
+    source: str,
+) -> list[SpanProposal]:
+    proposals: list[SpanProposal] = []
+    for start, end in _find_spans(tokens, phrase_tokens):
+        confidence = _proposal_confidence(entity, source, exact=True, line_local=False)
+        proposals.append(
+            SpanProposal(
+                start=start,
+                end=end,
+                entity=entity,
+                confidence=confidence,
+                source=source,
+                reason="global_match",
+            )
+        )
+    return proposals
+
+
+def _proposal_confidence(entity: str, source: str, *, exact: bool, line_local: bool) -> float:
+    score = FIELD_BASE_CONFIDENCE.get(source, 0.60) + ENTITY_CONFIDENCE_ADJUSTMENT.get(entity, 0.0)
+    if exact:
+        score += 0.08
+    if line_local:
+        score += 0.06
+    return max(0.05, min(1.0, score))
+
+
+def _try_apply_proposal(
+    proposal: SpanProposal,
+    tokens: list[OCRToken],
+    labels: list[str],
+    label_confidences: list[float],
+    filtering_summary: dict[str, int],
+) -> bool:
+    if proposal.confidence < MIN_PSEUDO_SPAN_CONFIDENCE and proposal.source != "gold_sroie":
+        filtering_summary["spans_filtered_low_confidence"] += 1
+        return False
+    if not _span_tokens_compatible(tokens, proposal.start, proposal.end, proposal.entity):
+        filtering_summary["spans_filtered_contradiction"] += 1
+        return False
+    if not _can_write_span(labels, proposal.start, proposal.end):
+        filtering_summary["spans_filtered_overlap"] += 1
+        return False
+    _write_span(labels, label_confidences, proposal.start, proposal.end, proposal.entity, proposal.confidence)
+    filtering_summary["spans_written"] += 1
+    return True
+
+
+def _span_tokens_compatible(tokens: list[OCRToken], start: int, end: int, entity: str) -> bool:
+    span_tokens = tokens[start:end]
+    if not span_tokens:
+        return False
+    if entity == "ITEM_NAME":
+        return all(_item_name_token_ok(token.text) for token in span_tokens)
+    if entity in {"SUBTOTAL", "TAX", "TOTAL", "ITEM_PRICE", "ITEM_QTY"}:
+        return all(_numeric_token_ok(token.text, entity) for token in span_tokens)
+    if entity == "DATE":
+        joined = " ".join(token.text for token in span_tokens)
+        return bool(re.search(r"\d", joined)) and ("/" in joined or "-" in joined or "." in joined)
+    if entity == "TIME":
+        joined = " ".join(token.text for token in span_tokens)
+        return bool(re.search(r"\d{1,2}[:.]\d{2}", joined))
+    return True
 
 
 def _format_float_candidates(value: float) -> set[str]:
@@ -218,74 +388,82 @@ def _label_item_fields(
     lines: list[OCRLine],
     tokens: list[OCRToken],
     labels: list[str],
+    label_confidences: list[float],
     items: Iterable[ReceiptItem],
     line_to_indexes: dict[int, list[int]],
+    filtering_summary: dict[str, int],
 ) -> dict[str, int]:
     item_list = list(items)
     if not item_list:
-        return {"items_detected": 0, "items_labeled": 0, "items_missing_price": 0, "name_spans": 0, "price_spans": 0}
+        return {
+            "items_detected": 0,
+            "items_labeled": 0,
+            "items_missing_price": 0,
+            "name_spans": 0,
+            "price_spans": 0,
+            "qty_spans": 0,
+        }
 
     labeled_items = 0
     missing_price = 0
     name_spans = 0
     price_spans = 0
+    qty_spans = 0
 
     for item in item_list:
         item_name_tokens = _phrase_to_tokens(item.name)
         if not item_name_tokens:
             continue
         if len(item_name_tokens) == 1 and len(item_name_tokens[0]) <= 2:
-            # Failure-driven fix: avoid short noisy ITEM_NAME pseudo labels.
+            filtering_summary["spans_filtered_item_noise"] += 1
             continue
 
-        # Prefer exact line containment for item names.
-        matched_line_ids: list[int] = []
-        for line in lines:
-            line_norm = _phrase_to_tokens(line.text)
-            if not line_norm:
-                continue
-            joined = " ".join(line_norm)
-            if " ".join(item_name_tokens) in joined:
-                matched_line_ids.append(line.line_id)
+        candidate_line_ids = _candidate_item_line_ids(lines, tokens, item_name_tokens, line_to_indexes)
+        item_name_written = _label_item_name(
+            tokens,
+            labels,
+            label_confidences,
+            item_name_tokens,
+            candidate_line_ids,
+            line_to_indexes,
+            filtering_summary,
+        )
+        if item_name_written:
+            name_spans += 1
 
-        item_name_written = False
-        if not matched_line_ids:
-            for start, end in _find_spans(tokens, item_name_tokens):
-                if _can_write_span(labels, start, end):
-                    _write_span(labels, start, end, "ITEM_NAME")
-                    name_spans += 1
-                    item_name_written = True
-                    break
-        else:
-            for line_id in matched_line_ids:
-                idxs = line_to_indexes.get(line_id, [])
-                if not idxs:
-                    continue
-                token_norms = [_normalize_token(tokens[idx].text) for idx in idxs]
-                name_norm = item_name_tokens
-                window = len(name_norm)
-                for rel in range(0, len(token_norms) - window + 1):
-                    candidate = token_norms[rel : rel + window]
-                    if all(_token_equivalent(a, b) for a, b in zip(candidate, name_norm)):
-                        start = idxs[rel]
-                        end = idxs[rel + window - 1] + 1
-                        if _can_write_span(labels, start, end):
-                            _write_span(labels, start, end, "ITEM_NAME")
-                            name_spans += 1
-                            item_name_written = True
-                            break
-
-        # Label quantity and price with line-awareness and nearest-number fallback.
-        candidate_lines = matched_line_ids or [line.line_id for line in lines]
         qty_candidates = _format_float_candidates(item.quantity)
         price_candidates = _format_float_candidates(item.line_total) | _format_float_candidates(item.unit_price)
-        _label_numeric_entity(tokens, labels, candidate_lines, line_to_indexes, qty_candidates, "ITEM_QTY")
-        price_written = _label_numeric_entity(tokens, labels, candidate_lines, line_to_indexes, price_candidates, "ITEM_PRICE")
+
+        qty_written = _label_item_numeric(
+            tokens,
+            labels,
+            label_confidences,
+            candidate_line_ids,
+            line_to_indexes,
+            qty_candidates,
+            "ITEM_QTY",
+            prefer_tail=False,
+            filtering_summary=filtering_summary,
+        )
+        price_written = _label_item_numeric(
+            tokens,
+            labels,
+            label_confidences,
+            candidate_line_ids,
+            line_to_indexes,
+            price_candidates,
+            "ITEM_PRICE",
+            prefer_tail=True,
+            filtering_summary=filtering_summary,
+        )
+
+        if qty_written:
+            qty_spans += 1
         if price_written:
             price_spans += 1
         else:
             missing_price += 1
-        if item_name_written:
+        if item_name_written and price_written:
             labeled_items += 1
 
     return {
@@ -294,30 +472,166 @@ def _label_item_fields(
         "items_missing_price": missing_price,
         "name_spans": name_spans,
         "price_spans": price_spans,
+        "qty_spans": qty_spans,
     }
 
 
-def _label_numeric_entity(
+def _candidate_item_line_ids(
+    lines: list[OCRLine],
+    tokens: list[OCRToken],
+    item_name_tokens: list[str],
+    line_to_indexes: dict[int, list[int]],
+) -> list[int]:
+    candidates: list[int] = []
+    target = " ".join(item_name_tokens)
+    for line in lines:
+        idxs = line_to_indexes.get(line.line_id, [])
+        if not idxs:
+            continue
+        line_tokens = [_normalize_token(tokens[idx].text) for idx in idxs if _normalize_token(tokens[idx].text)]
+        if not line_tokens:
+            continue
+        joined = " ".join(line_tokens)
+        if target in joined:
+            candidates.append(line.line_id)
+    if candidates:
+        expanded: list[int] = []
+        for line_id in candidates:
+            expanded.append(line_id)
+            expanded.append(line_id + 1)
+        return list(dict.fromkeys(expanded))
+    return [line.line_id for line in lines]
+
+
+def _label_item_name(
     tokens: list[OCRToken],
     labels: list[str],
-    candidate_lines: list[int],
+    label_confidences: list[float],
+    item_name_tokens: list[str],
+    candidate_line_ids: list[int],
+    line_to_indexes: dict[int, list[int]],
+    filtering_summary: dict[str, int],
+) -> bool:
+    target = " ".join(item_name_tokens)
+    proposals: list[SpanProposal] = []
+    for line_id in candidate_line_ids:
+        idxs = line_to_indexes.get(line_id, [])
+        token_norms = [_normalize_token(tokens[idx].text) for idx in idxs]
+        window = len(item_name_tokens)
+        for rel in range(0, len(token_norms) - window + 1):
+            candidate = token_norms[rel : rel + window]
+            if " ".join(candidate) != target and not all(_token_equivalent(a, b) for a, b in zip(candidate, item_name_tokens)):
+                continue
+            start = idxs[rel]
+            end = idxs[rel + window - 1] + 1
+            proposals.append(
+                SpanProposal(
+                    start=start,
+                    end=end,
+                    entity="ITEM_NAME",
+                    confidence=_proposal_confidence("ITEM_NAME", "pseudo_rules", exact=True, line_local=True),
+                    source="pseudo_rules",
+                    reason="item_name",
+                )
+            )
+    for proposal in sorted(proposals, key=lambda item: item.confidence, reverse=True):
+        if _try_apply_proposal(proposal, tokens, labels, label_confidences, filtering_summary):
+            return True
+    return False
+
+
+def _label_item_numeric(
+    tokens: list[OCRToken],
+    labels: list[str],
+    label_confidences: list[float],
+    candidate_line_ids: list[int],
     line_to_indexes: dict[int, list[int]],
     candidates: set[str],
     entity: str,
+    *,
+    prefer_tail: bool,
+    filtering_summary: dict[str, int],
 ) -> bool:
     if not candidates:
         return False
     candidate_norms = {_normalize_token(candidate) for candidate in candidates if candidate}
-    for line_id in candidate_lines:
-        idxs = line_to_indexes.get(line_id, [])
+    for line_id in candidate_line_ids:
+        idxs = list(line_to_indexes.get(line_id, []))
+        if prefer_tail:
+            idxs = list(reversed(idxs))
         for idx in idxs:
             if labels[idx] != "O":
                 continue
             norm = _normalize_token(tokens[idx].text)
-            if norm in candidate_norms and _numeric_token_ok(tokens[idx].text, entity):
-                labels[idx] = f"B-{entity}"
+            if norm not in candidate_norms or not _numeric_token_ok(tokens[idx].text, entity):
+                continue
+            confidence = _proposal_confidence(entity, "pseudo_rules", exact=True, line_local=True)
+            proposal = SpanProposal(
+                start=idx,
+                end=idx + 1,
+                entity=entity,
+                confidence=confidence,
+                source="pseudo_rules",
+                reason="item_numeric",
+            )
+            if _try_apply_proposal(proposal, tokens, labels, label_confidences, filtering_summary):
                 return True
+    filtering_summary["spans_filtered_item_noise"] += 1
     return False
+
+
+def _build_sample_quality(
+    labels: list[str],
+    label_confidences: list[float],
+    target_sources: dict[str, str],
+    filtering_summary: dict[str, int],
+    item_summary: dict[str, int],
+) -> dict[str, float | int | bool | str]:
+    labeled = [label for label in labels if label != "O"]
+    labeled_ratio = float(len(labeled) / max(len(labels), 1))
+    avg_conf = float(
+        sum(weight for label, weight in zip(labels, label_confidences) if label != "O") / max(len(labeled), 1)
+    ) if labeled else 0.0
+    pseudo_only = bool(target_sources) and set(target_sources.values()) == {"pseudo_rules"}
+    critical_hits = sum(1 for entity in CRITICAL_ENTITY_NAMES if any(label.endswith(f"-{entity}") for label in labels))
+    return {
+        "labeled_tokens": len(labeled),
+        "labeled_ratio": labeled_ratio,
+        "avg_labeled_confidence": avg_conf,
+        "pseudo_only": pseudo_only,
+        "critical_fields_labeled": critical_hits,
+        "filtered_spans": (
+            filtering_summary.get("spans_filtered_low_confidence", 0)
+            + filtering_summary.get("spans_filtered_unreliable", 0)
+            + filtering_summary.get("spans_filtered_overlap", 0)
+            + filtering_summary.get("spans_filtered_ambiguous", 0)
+            + filtering_summary.get("spans_filtered_item_noise", 0)
+            + filtering_summary.get("spans_filtered_contradiction", 0)
+        ),
+        "items_detected": int(item_summary.get("items_detected", 0)),
+        "items_labeled": int(item_summary.get("items_labeled", 0)),
+        "items_missing_price": int(item_summary.get("items_missing_price", 0)),
+    }
+
+
+def _should_drop_sample(sample_quality: dict[str, float | int | bool | str]) -> tuple[bool, str]:
+    labeled_ratio = float(sample_quality.get("labeled_ratio", 0.0))
+    avg_conf = float(sample_quality.get("avg_labeled_confidence", 0.0))
+    critical_hits = int(sample_quality.get("critical_fields_labeled", 0))
+    pseudo_only = bool(sample_quality.get("pseudo_only", False))
+    items_detected = int(sample_quality.get("items_detected", 0))
+    items_labeled = int(sample_quality.get("items_labeled", 0))
+    items_missing_price = int(sample_quality.get("items_missing_price", 0))
+
+    if labeled_ratio > NOISY_SAMPLE_MAX_LABELED_RATIO:
+        return True, "over_labeled_noisy_sample"
+    if pseudo_only and labeled_ratio < NOISY_SAMPLE_MIN_LABELED_RATIO:
+        return True, "under_labeled_pseudo_only_sample"
+    if avg_conf < 0.52 and critical_hits == 0:
+        return True, "low_confidence_without_critical_fields"
+    if items_detected >= 3 and items_labeled == 0 and items_missing_price >= max(items_detected - 1, 1):
+        return True, "items_detected_but_not_labeled"
+    return False, ""
 
 
 def _entity_value_is_reliable(entity: str, phrase_tokens: list[str], raw_value: str) -> bool:
@@ -326,7 +640,7 @@ def _entity_value_is_reliable(entity: str, phrase_tokens: list[str], raw_value: 
         return len(joined) >= 2 and any(ch.isdigit() for ch in joined)
     if entity == "TIME":
         return ":" in raw_value or re.search(r"\b\d{1,2}[:.]\d{2}\b", raw_value) is not None
-    if entity in {"SUBTOTAL", "TAX"}:
+    if entity in {"SUBTOTAL", "TAX", "TOTAL"}:
         return any(ch.isdigit() for ch in joined)
     if entity == "CASHIER":
         return len(joined) >= 4
@@ -335,16 +649,34 @@ def _entity_value_is_reliable(entity: str, phrase_tokens: list[str], raw_value: 
     return True
 
 
+def _item_name_token_ok(text: str) -> bool:
+    raw = (text or "").strip()
+    norm = _normalize_token(raw)
+    if not norm:
+        return False
+    if _looks_like_amount(raw):
+        return False
+    if norm.isdigit():
+        return False
+    return any(ch.isalpha() for ch in raw)
+
+
+def _looks_like_amount(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    return re.fullmatch(r"[A-Z]{0,2}\d+[.,]?\d*", raw.replace(" ", "").upper()) is not None
+
+
 def _numeric_token_ok(text: str, entity: str) -> bool:
-    norm = _normalize_token(text)
+    raw = (text or "").strip()
+    norm = _normalize_token(raw)
     if not norm:
         return False
     if entity == "ITEM_QTY":
-        # Reduce false positives: quantities are usually compact numeric tokens.
         return norm.isdigit() and len(norm) <= 3
-    if entity == "ITEM_PRICE":
-        # Prefer decimal-like or multi-digit tokens for prices.
-        return any(ch.isdigit() for ch in norm) and len(norm) >= 2
+    if entity in {"ITEM_PRICE", "SUBTOTAL", "TAX", "TOTAL"}:
+        return _looks_like_amount(raw) and any(ch.isdigit() for ch in raw)
     return any(ch.isdigit() for ch in norm)
 
 

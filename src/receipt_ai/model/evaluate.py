@@ -44,10 +44,13 @@ def main() -> None:
     pred_sequences: list[list[str]] = []
     predictions: list[dict[str, Any]] = []
     warnings_counter: Counter[str] = Counter()
+    dropped_by_weak_label = 0
     for idx, sample in enumerate(_iter_samples(loader, args)):
         if idx >= args.max_samples:
             break
         weak = build_weak_bio_labels(sample)
+        if weak.drop_training_sample:
+            dropped_by_weak_label += 1
         gold_labels = sanitize_labels(weak.labels)
         pred = backend.predict(sample.image_path, sample.ocr_lines, sample.ocr_tokens, sample.image_width, sample.image_height)
         aligned_length = min(len(gold_labels), len(pred.token_labels), len(sample.ocr_tokens))
@@ -64,6 +67,10 @@ def main() -> None:
             {
                 "sample_id": sample.sample_id,
                 "assumptions": weak.assumptions,
+                "sample_quality": weak.sample_quality,
+                "filtering_summary": weak.filtering_summary,
+                "drop_training_sample": weak.drop_training_sample,
+                "drop_reason": weak.drop_reason,
                 "warnings": pred.warnings,
                 "tokens": [token.text for token in sample.ocr_tokens[:aligned_length]],
                 "gold_labels": gold_trimmed,
@@ -87,6 +94,9 @@ def main() -> None:
         },
         "metrics": metrics,
         "warning_counts": dict(sorted(warnings_counter.items())),
+        "weak_label_quality": {
+            "samples_flagged_as_droppable": dropped_by_weak_label,
+        },
     }
 
     (output_dir / "metrics.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
