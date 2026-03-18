@@ -1,180 +1,61 @@
+#!/usr/bin/env python3
+
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
+import sys
 import warnings
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from src.receipt_ai.runtime.output import format_result_output
+from src.receipt_ai.runtime.runner import load_runtime_config, resolve_mode, run_extraction
 
 
 warnings.warn(
-    "infer_layoutlmv3_receipt.py is deprecated. Use app.py or scripts/run_receipt_ai_batch.py, "
-    "which run the unified src.receipt_ai pipeline.",
+    "infer_layoutlmv3_receipt.py is deprecated. Use run_receipt_ai.py for the production entrypoint.",
     DeprecationWarning,
     stacklevel=2,
 )
 
-from data_utils import prepare_words_boxes_for_inference
-from src.app.extraction_modes import (
-    build_easyocr_rules_result,
-    build_layoutlmv3_only_result,
-    build_hybrid_result,
-)
-from src.app.receipt_script_parser import parse_receipt_script
-from src.layoutlmv3_engine import predict_layoutlmv3_from_words, predict_layoutlmv3_with_hybrid
-
-
-def to_jsonable(value):
-    import numpy as np
-    if isinstance(value, dict):
-        return {str(k): to_jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [to_jsonable(v) for v in value]
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, np.generic):
-        return value.item()
-    return value
-
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Run fine-tuned LayoutLMv3 receipt KIE inference with support for 3 extraction modes."
-    )
+    parser = argparse.ArgumentParser(description="Deprecated compatibility wrapper around the unified receipt-ai runtime.")
     parser.add_argument("--image", required=True, help="Path to receipt image")
-    parser.add_argument("--checkpoint", required=True, help="Fine-tuned LayoutLMv3 checkpoint path")
-    parser.add_argument("--ocr-path", default=None, help="Optional SROIE box txt path")
-    parser.add_argument(
-        "--ocr-mode",
-        default="none",
-        choices=["none", "clahe", "denoise", "otsu", "adaptive"],
-        help="Used when OCR path is not provided and EasyOCR fallback is used.",
-    )
+    parser.add_argument("--checkpoint", default="", help="Optional fine-tuned LayoutLMv3 checkpoint override")
     parser.add_argument(
         "--extraction-mode",
-        default="layoutlmv3_only",
-        choices=["easyocr_rules", "layoutlmv3_only", "hybrid"],
-        help="Extraction mode: easyocr_rules (rule-based), layoutlmv3_only (pure model), hybrid (model+parser+fusion)",
+        default="hybrid",
+        choices=["easyocr_rules", "layoutlm_only", "hybrid"],
+        help="Extraction mode",
     )
-    parser.add_argument("--max-words", type=int, default=512)
+    parser.add_argument("--config", default="", help="Optional runtime config path")
+    parser.add_argument("--output-mode", default="full", choices=["full", "minimal"])
     parser.add_argument("--pretty", action="store_true", help="Pretty print JSON output")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-
-    image_path = Path(args.image).resolve()
+    image_path = Path(args.image).expanduser().resolve()
     if not image_path.exists():
         raise FileNotFoundError(f"Image not found: {image_path}")
 
-    checkpoint_raw = str(args.checkpoint).strip()
-    checkpoint_path = Path(checkpoint_raw).expanduser().resolve()
-
-    # If checkpoint looks like a local path, require it to exist so users get a clear message.
-    looks_like_local = "/" in checkpoint_raw or checkpoint_raw.startswith(".")
-    if looks_like_local and not checkpoint_path.exists():
-        raise FileNotFoundError(
-            f"Checkpoint folder not found: {checkpoint_path}. "
-            "Train first with train_layoutlmv3_receipts.py or provide a valid model path."
-        )
-
-    if looks_like_local and checkpoint_path.exists():
-        required_any = ["pytorch_model.bin", "model.safetensors"]
-        required_all = ["config.json", "preprocessor_config.json"]
-
-        missing_all = [name for name in required_all if not (checkpoint_path / name).exists()]
-        has_any_model = any((checkpoint_path / name).exists() for name in required_any)
-
-        if missing_all or not has_any_model:
-            raise FileNotFoundError(
-                f"Checkpoint directory is incomplete: {checkpoint_path}. "
-                "Expected files: config.json, preprocessor_config.json, and model weights "
-                "(pytorch_model.bin or model.safetensors). Re-run training or use a complete checkpoint."
-            )
-
-    ocr_path = Path(args.ocr_path).resolve() if args.ocr_path else None
-
-    features = prepare_words_boxes_for_inference(
-        image_path=image_path,
-        ocr_path=ocr_path,
-        ocr_mode=args.ocr_mode,
-        max_words=args.max_words,
+    cfg, policy = load_runtime_config(args.config or None)
+    effective_mode, _, messages = resolve_mode(
+        args.extraction_mode,
+        checkpoint_override=args.checkpoint,
+        cfg=cfg,
+        policy=policy,
     )
+    result = run_extraction(image_path, mode=effective_mode, cfg=cfg)
+    payload = format_result_output(result, output_mode=args.output_mode)
+    if messages:
+        payload["metadata"]["warnings"] = list(payload["metadata"].get("warnings") or []) + list(messages)
 
-    model_path = str(checkpoint_path) if looks_like_local else checkpoint_raw
-    ocr_text = str(features.get("raw_text", ""))
-
-    # ===========================================================================
-    # MODE: EASYOCR + RULES
-    # ===========================================================================
-    if args.extraction_mode == "easyocr_rules":
-        receipt_script = parse_receipt_script(ocr_text) if ocr_text.strip() else {}
-        
-        payload = build_easyocr_rules_result(
-            filename=image_path.name,
-            mode_selected=args.ocr_mode,
-            chosen_mode=args.ocr_mode,
-            mean_conf=features.get("ocr_conf", 0.0),
-            score=features.get("ocr_score", 0.0),
-            edited_text=ocr_text,
-            raw_text=ocr_text,
-            ocr_results=features.get("ocr_results", []),
-            receipt_script=receipt_script,
-        )
-
-    # ===========================================================================
-    # MODE: LAYOUTLMV3 ONLY
-    # ===========================================================================
-    elif args.extraction_mode == "layoutlmv3_only":
-        prediction = predict_layoutlmv3_from_words(
-            image_rgb=features["image_rgb"],
-            words=features["words"],
-            boxes=features["boxes"],
-            abs_boxes=features["abs_boxes"],
-            model_name_or_path=model_path,
-            was_truncated=bool(features.get("truncated", False)),
-        )
-
-        payload = build_layoutlmv3_only_result(
-            filename=image_path.name,
-            model_path=model_path,
-            mode_selected=args.ocr_mode,
-            chosen_mode=args.ocr_mode,
-            prediction=prediction,
-        )
-
-    # ===========================================================================
-    # MODE: HYBRID
-    # ===========================================================================
-    elif args.extraction_mode == "hybrid":
-        # Get LayoutLMv3 predictions
-        model_pred, _ = predict_layoutlmv3_with_hybrid(
-            image_rgb=features["image_rgb"],
-            ocr_results=features.get("ocr_results", []),
-            model_name_or_path=model_path,
-        )
-
-        # Parse receipt script
-        parser_output = parse_receipt_script(ocr_text) if ocr_text.strip() else {}
-
-        # Build hybrid result
-        payload = build_hybrid_result(
-            filename=image_path.name,
-            model_path=model_path,
-            mode_selected=args.ocr_mode,
-            chosen_mode=args.ocr_mode,
-            model_prediction=model_pred,
-            parser_output=parser_output,
-            ocr_text=ocr_text,
-        )
-
-    else:
-        raise ValueError(f"Unknown extraction mode: {args.extraction_mode}")
-
-    if args.pretty:
-        print(json.dumps(to_jsonable(payload), indent=2))
-    else:
-        print(json.dumps(to_jsonable(payload)))
+    print(json.dumps(payload, indent=2 if args.pretty else None))
 
 
 if __name__ == "__main__":

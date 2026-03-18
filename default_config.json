@@ -1,0 +1,29 @@
+{
+  "default_mode": "easyocr_rules",
+  "preferred_checkpoint": "/home/saif/Projects/noise-robust-ocr-pipeline/outputs/layoutlmv3_receipt_ai/smoke_richer_run",
+  "fallback_mode_on_model_failure": "easyocr_rules",
+  "allow_legacy_checkpoint": false,
+  "hybrid_thresholds": {
+    "model_field_confidence": 0.65,
+    "model_semantic_strong_confidence": 0.75,
+    "model_takeover_margin": 0.12,
+    "low_confidence_guard": 0.5,
+    "total_item_consistency_tolerance": 0.08
+  },
+  "output": {
+    "mode": "full",
+    "include_confidence": true,
+    "include_provenance": true
+  },
+  "deterministic_seed": 42,
+  "decision": {
+    "status": "no_promotion_artifact_found",
+    "confidence": "unknown",
+    "rationale": "No checkpoint promotion decision artifact was found. Default config falls back to the current runtime recommendation."
+  },
+  "evidence": {
+    "runtime_policy_source": "/home/saif/Projects/noise-robust-ocr-pipeline/outputs/runtime/recommended_runtime_config.json",
+    "policy_recommendation_source": "/home/saif/Projects/noise-robust-ocr-pipeline/outputs/runtime/best_policy_recommendation.json",
+    "checkpoint_registry_source": "/home/saif/Projects/noise-robust-ocr-pipeline/outputs/runtime/checkpoint_registry.json"
+  }
+}

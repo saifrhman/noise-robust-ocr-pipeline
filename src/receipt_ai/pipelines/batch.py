@@ -4,11 +4,9 @@ import argparse
 import json
 from pathlib import Path
 
-from src.receipt_ai.config import ReceiptAIConfig
 from src.receipt_ai.dataset_loader import SROIEDatasetLoader
-from src.receipt_ai.model.compatibility import inspect_checkpoint_label_space
-from src.receipt_ai.pipelines.entrypoints import run_easyocr_rules, run_hybrid, run_layoutlm_only
-from src.receipt_ai.runtime.policy import apply_runtime_policy, load_runtime_policy
+from src.receipt_ai.runtime.output import format_result_output
+from src.receipt_ai.runtime.runner import load_runtime_config, resolve_mode, run_extraction
 
 
 def parse_args() -> argparse.Namespace:
@@ -22,31 +20,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--strict", action="store_true")
     parser.add_argument("--output-dir", default="outputs/receipt_ai_batch")
     parser.add_argument("--output-jsonl", default="")
+    parser.add_argument("--config", default="")
+    parser.add_argument("--checkpoint", default="")
+    parser.add_argument("--output-mode", default="", choices=["", "full", "minimal"])
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    cfg = ReceiptAIConfig.from_env()
-    policy = load_runtime_policy()
-    cfg = apply_runtime_policy(cfg, policy)
+    cfg, policy = load_runtime_config(args.config or None)
     cfg.paths.data_root = Path(args.dataset_root).expanduser().resolve()
+    output_mode = args.output_mode or str((policy.output or {}).get("mode", "full"))
+    if output_mode not in {"full", "minimal"}:
+        output_mode = "full"
 
     loader = SROIEDatasetLoader(cfg.paths.data_root)
 
-    effective_mode = policy.default_mode if args.mode == "auto" else args.mode
-    if effective_mode not in {"easyocr_rules", "layoutlm_only", "hybrid"}:
-        effective_mode = "hybrid"
-    effective_mode, mode_warning = _resolve_mode_with_model_fallback(effective_mode, cfg, policy)
+    requested_mode = policy.default_mode if args.mode == "auto" else args.mode
+    effective_mode, checkpoint_used, mode_messages = resolve_mode(
+        requested_mode,
+        checkpoint_override=args.checkpoint,
+        cfg=cfg,
+        policy=policy,
+    )
+    mode_warning = " ".join(mode_messages).strip()
 
     output_dir = Path(args.output_dir).expanduser().resolve() / effective_mode
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    runner = {
-        "easyocr_rules": run_easyocr_rules,
-        "layoutlm_only": run_layoutlm_only,
-        "hybrid": run_hybrid,
-    }[effective_mode]
 
     aggregate: list[str] = []
     processed = 0
@@ -56,14 +56,20 @@ def main() -> None:
 
         payload: dict[str, object]
         try:
-            result = runner(sample.image_path, config=cfg)
+            result = run_extraction(sample.image_path, mode=effective_mode, cfg=cfg)
             payload = {
                 "sample_id": sample.sample_id,
                 "image_path": str(sample.image_path),
-                "requested_mode": args.mode,
+                "requested_mode": requested_mode,
                 "effective_mode": effective_mode,
+                "checkpoint_used": checkpoint_used,
                 "mode_warning": mode_warning,
-                "result": result.to_dict(),
+                "result": format_result_output(
+                    result,
+                    output_mode=output_mode,
+                    include_confidence=bool((policy.output or {}).get("include_confidence", True)),
+                    include_provenance=bool((policy.output or {}).get("include_provenance", True)),
+                ),
             }
         except Exception as exc:
             if args.strict:
@@ -71,8 +77,9 @@ def main() -> None:
             payload = {
                 "sample_id": sample.sample_id,
                 "image_path": str(sample.image_path),
-                "requested_mode": args.mode,
+                "requested_mode": requested_mode,
                 "effective_mode": effective_mode,
+                "checkpoint_used": checkpoint_used,
                 "mode_warning": mode_warning,
                 "error": str(exc),
             }
@@ -89,40 +96,6 @@ def main() -> None:
     print(f"Saved {processed} batch outputs to {output_dir}")
     if mode_warning:
         print(f"Mode warning: {mode_warning}")
-
-
-def _resolve_mode_with_model_fallback(
-    requested_mode: str,
-    cfg: ReceiptAIConfig,
-    policy,
-) -> tuple[str, str]:
-    if requested_mode not in {"layoutlm_only", "hybrid"}:
-        return requested_mode, ""
-
-    checkpoint_path = cfg.paths.model_checkpoint
-    if not checkpoint_path.exists():
-        fallback = policy.fallback_mode_on_model_failure or "easyocr_rules"
-        warning = (
-            f"Checkpoint missing at {checkpoint_path}. Falling back from {requested_mode} to {fallback}."
-        )
-        return fallback, warning
-
-    compatibility = inspect_checkpoint_label_space(checkpoint_path)
-    if (not compatibility.is_compatible) and (not compatibility.is_legacy):
-        fallback = policy.fallback_mode_on_model_failure or "easyocr_rules"
-        warning = (
-            f"Checkpoint incompatible ({compatibility.message}). Falling back from {requested_mode} to {fallback}."
-        )
-        return fallback, warning
-
-    if compatibility.is_legacy and not bool(policy.allow_legacy_checkpoint):
-        fallback = policy.fallback_mode_on_model_failure or "easyocr_rules"
-        warning = (
-            f"Legacy checkpoint detected and legacy usage is disabled. Falling back from {requested_mode} to {fallback}."
-        )
-        return fallback, warning
-
-    return requested_mode, ""
 
 
 if __name__ == "__main__":

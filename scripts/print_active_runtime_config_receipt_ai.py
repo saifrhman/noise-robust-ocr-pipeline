@@ -15,7 +15,7 @@ from src.receipt_ai.model.checkpoint_registry import load_checkpoint_registry
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Print active runtime policy and checkpoint registry summary.")
-    parser.add_argument("--policy-path", default="")
+    parser.add_argument("--policy-path", default="default_config.json")
     parser.add_argument("--registry-path", default="")
     return parser.parse_args()
 

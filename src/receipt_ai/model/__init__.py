@@ -1,13 +1,7 @@
-"""Model-related modules for receipt token classification."""
+"""Model package for receipt-ai.
 
-from .compatibility import CheckpointCompatibility, inspect_checkpoint_label_space, inspect_label_mapping
-from .metrics import compute_token_classification_metrics
-from .weak_label_analysis import analyze_split
+This package intentionally avoids eager imports so runtime-only commands can
+work without pulling in optional training dependencies.
+"""
 
-__all__ = [
-	"CheckpointCompatibility",
-	"analyze_split",
-	"compute_token_classification_metrics",
-	"inspect_checkpoint_label_space",
-	"inspect_label_mapping",
-]
+__all__ = []

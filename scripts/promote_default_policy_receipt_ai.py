@@ -17,7 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Promote best-policy recommendation to runtime default config.")
     parser.add_argument("--recommendation-json", default="outputs/runtime/best_policy_recommendation.json")
     parser.add_argument("--checkpoint", default="", help="Override preferred checkpoint path")
-    parser.add_argument("--policy-path", default="outputs/runtime/recommended_runtime_config.json")
+    parser.add_argument("--policy-path", default="default_config.json")
     parser.add_argument("--allow-legacy-checkpoint", action="store_true")
     parser.add_argument("--fallback-mode", default="easyocr_rules", choices=["easyocr_rules", "layoutlm_only", "hybrid"])
     parser.add_argument("--model-field-confidence", type=float, default=None)
@@ -61,6 +61,9 @@ def main() -> None:
         fallback_mode_on_model_failure=args.fallback_mode,
         allow_legacy_checkpoint=bool(args.allow_legacy_checkpoint),
         hybrid_thresholds=thresholds,
+        output=dict(old_policy.output),
+        deterministic_seed=int(old_policy.deterministic_seed),
+        decision=dict(old_policy.decision),
         evidence={
             "recommendation_file": str(rec_path),
             "confidence": recommendation.get("evidence", {}).get("confidence"),
@@ -77,7 +80,7 @@ def main() -> None:
         backup_dir = policy_target.parent / "history"
         backup_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = backup_dir / f"recommended_runtime_config_{stamp}.json"
+        backup_path = backup_dir / f"{policy_target.stem}_{stamp}.json"
         backup_path.write_text(policy_target.read_text(encoding="utf-8"), encoding="utf-8")
         print(f"Backed up previous policy to: {backup_path}")
 

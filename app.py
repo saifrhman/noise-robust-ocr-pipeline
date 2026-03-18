@@ -6,17 +6,8 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
-from src.receipt_ai.config import ReceiptAIConfig
-from src.receipt_ai.model.compatibility import inspect_checkpoint_label_space
-from src.receipt_ai.pipelines.entrypoints import run_easyocr_rules, run_hybrid, run_layoutlm_only
-from src.receipt_ai.runtime.policy import apply_runtime_policy, load_runtime_policy
-
-
-MODE_LABELS = {
-    "easyocr_rules": "EasyOCR + Rules",
-    "layoutlm_only": "LayoutLMv3 Only",
-    "hybrid": "Hybrid Extraction",
-}
+from src.receipt_ai.runtime.output import format_result_output
+from src.receipt_ai.runtime.runner import MODE_LABELS, load_runtime_config, resolve_mode, run_extraction
 
 LABEL_TO_MODE = {label: mode for mode, label in MODE_LABELS.items()}
 
@@ -26,78 +17,6 @@ def _write_uploaded_file(uploaded_file) -> Path:
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
         handle.write(uploaded_file.getvalue())
         return Path(handle.name)
-
-
-def _load_app_config() -> tuple[ReceiptAIConfig, object]:
-    cfg = ReceiptAIConfig.from_env()
-    policy = load_runtime_policy()
-    return apply_runtime_policy(cfg, policy), policy
-
-
-def _resolve_model_mode(
-    selected_mode: str,
-    checkpoint_input: str,
-    cfg: ReceiptAIConfig,
-    policy,
-) -> tuple[str, list[str]]:
-    if selected_mode == "easyocr_rules":
-        return selected_mode, []
-
-    messages: list[str] = []
-    raw_checkpoint = (checkpoint_input or "").strip()
-    fallback_mode = policy.fallback_mode_on_model_failure or "easyocr_rules"
-
-    if not raw_checkpoint:
-        messages.append(
-            f"No fine-tuned LayoutLMv3 checkpoint is configured. {MODE_LABELS[selected_mode]} cannot run; "
-            f"falling back to {MODE_LABELS.get(fallback_mode, fallback_mode)}."
-        )
-        return fallback_mode, messages
-
-    if raw_checkpoint == "microsoft/layoutlmv3-base":
-        messages.append(
-            "microsoft/layoutlmv3-base is not a supported receipt extraction checkpoint. "
-            f"Falling back to {MODE_LABELS.get(fallback_mode, fallback_mode)}."
-        )
-        return fallback_mode, messages
-
-    checkpoint_path = Path(raw_checkpoint).expanduser()
-    if not checkpoint_path.exists():
-        messages.append(
-            f"Configured checkpoint is missing: {checkpoint_path}. "
-            f"Falling back to {MODE_LABELS.get(fallback_mode, fallback_mode)}."
-        )
-        return fallback_mode, messages
-
-    compatibility = inspect_checkpoint_label_space(checkpoint_path)
-    if (not compatibility.is_compatible) and (not compatibility.is_legacy):
-        messages.append(
-            f"Checkpoint incompatible: {compatibility.message} "
-            f"Falling back to {MODE_LABELS.get(fallback_mode, fallback_mode)}."
-        )
-        return fallback_mode, messages
-
-    if compatibility.is_legacy and not bool(policy.allow_legacy_checkpoint):
-        messages.append(
-            "Legacy/reduced-schema checkpoint detected and disabled by runtime policy. "
-            f"Falling back to {MODE_LABELS.get(fallback_mode, fallback_mode)}."
-        )
-        return fallback_mode, messages
-
-    if compatibility.is_legacy:
-        messages.append("Legacy checkpoint detected; richer-schema extraction may be limited.")
-
-    cfg.paths.model_checkpoint = checkpoint_path.resolve()
-    return selected_mode, messages
-
-
-def _run_pipeline(image_path: Path, mode: str, cfg: ReceiptAIConfig):
-    runner = {
-        "easyocr_rules": run_easyocr_rules,
-        "layoutlm_only": run_layoutlm_only,
-        "hybrid": run_hybrid,
-    }[mode]
-    return runner(image_path, config=cfg)
 
 
 def _show_summary(result: dict) -> None:
@@ -145,20 +64,20 @@ st.set_page_config(page_title="Receipt OCR Extractor", page_icon="🧾", layout=
 st.title("🧾 Receipt OCR Extractor")
 st.caption("Upload a receipt, run the unified `src/receipt_ai` pipeline, and export structured JSON.")
 
-cfg, runtime_policy = _load_app_config()
+cfg, runtime_policy = load_runtime_config()
 
 with st.sidebar:
-    st.header("Runtime Policy")
+    st.header("Default Config")
     st.caption(f"Default mode: {runtime_policy.default_mode}")
     st.caption(f"Fallback mode: {runtime_policy.fallback_mode_on_model_failure}")
     if runtime_policy.preferred_checkpoint:
         st.caption(f"Preferred checkpoint: {runtime_policy.preferred_checkpoint}")
+    if runtime_policy.decision:
+        st.caption(f"Promotion decision: {runtime_policy.decision.get('status', 'n/a')}")
 
     st.divider()
     st.header("LayoutLMv3 Settings")
-    default_checkpoint = runtime_policy.preferred_checkpoint or str(cfg.paths.model_checkpoint)
-    if default_checkpoint == "microsoft/layoutlmv3-base":
-        default_checkpoint = ""
+    default_checkpoint = runtime_policy.preferred_checkpoint or str(cfg.paths.model_checkpoint or "")
     layout_model_path = st.text_input(
         "Fine-tuned checkpoint path",
         value=default_checkpoint,
@@ -166,10 +85,21 @@ with st.sidebar:
     ).strip()
 
     st.divider()
+    st.header("Output")
+    default_output_mode = str(runtime_policy.output.get("mode", "full"))
+    output_mode = st.radio(
+        "JSON output mode",
+        options=["full", "minimal"],
+        index=0 if default_output_mode != "minimal" else 1,
+        horizontal=True,
+    )
+    include_confidence = st.checkbox("Include confidence", value=bool(runtime_policy.output.get("include_confidence", True)))
+    include_provenance = st.checkbox("Include provenance", value=bool(runtime_policy.output.get("include_provenance", True)))
+
+    st.divider()
     st.header("About")
-    st.write("All extraction modes now run through `src/receipt_ai`.")
-    st.write("`EasyOCR + Rules` uses OCR plus the normalized receipt rules parser.")
-    st.write("`LayoutLMv3 Only` and `Hybrid` require a valid fine-tuned receipt checkpoint.")
+    st.write("The app uses the unified `src/receipt_ai` pipeline and `default_config.json` by default.")
+    st.write("Manual overrides here affect only the current UI session.")
 
 uploaded = st.file_uploader("Upload receipt image", type=["png", "jpg", "jpeg"])
 
@@ -206,26 +136,36 @@ if uploaded:
 
     st.divider()
 
-    effective_mode, mode_messages = _resolve_model_mode(selected_mode, layout_model_path, cfg, runtime_policy)
+    effective_mode, checkpoint_used, mode_messages = resolve_mode(
+        selected_mode,
+        checkpoint_override=layout_model_path,
+        cfg=cfg,
+        policy=runtime_policy,
+    )
     for message in mode_messages:
         if "falling back" in message.lower():
             st.warning(message)
         else:
             st.info(message)
 
-    if effective_mode != selected_mode:
-        st.caption(
-            f"Requested mode: {MODE_LABELS[selected_mode]} | Effective mode: {MODE_LABELS.get(effective_mode, effective_mode)}"
-        )
+    st.caption(f"Selected mode: {MODE_LABELS[selected_mode]}")
+    st.caption(f"Effective mode: {MODE_LABELS.get(effective_mode, effective_mode)}")
+    st.caption(f"Checkpoint used: {checkpoint_used or 'none'}")
+    st.caption(f"Fallback behavior: {runtime_policy.fallback_mode_on_model_failure}")
 
     if run_pipeline:
         temp_image_path = _write_uploaded_file(uploaded)
-        output_key = f"{uploaded.name}|{selected_mode}|{effective_mode}|{layout_model_path}"
+        output_key = f"{uploaded.name}|{selected_mode}|{effective_mode}|{layout_model_path}|{output_mode}|{int(include_confidence)}|{int(include_provenance)}"
 
         with st.spinner(f"Running {MODE_LABELS.get(effective_mode, effective_mode)}..."):
             try:
-                result = _run_pipeline(temp_image_path, effective_mode, cfg)
-                result_dict = result.to_dict()
+                result = run_extraction(temp_image_path, mode=effective_mode, cfg=cfg)
+                result_dict = format_result_output(
+                    result,
+                    output_mode=output_mode,
+                    include_confidence=include_confidence,
+                    include_provenance=include_provenance,
+                )
                 st.session_state.pipeline_result = result_dict
                 st.session_state.pipeline_result_key = output_key
                 st.session_state.pipeline_result_error = ""
@@ -235,7 +175,7 @@ if uploaded:
                 st.session_state.pipeline_result_error = str(exc)
 
     result_key = st.session_state.get("pipeline_result_key", "")
-    output_key = f"{uploaded.name}|{selected_mode}|{effective_mode}|{layout_model_path}"
+    output_key = f"{uploaded.name}|{selected_mode}|{effective_mode}|{layout_model_path}|{output_mode}|{int(include_confidence)}|{int(include_provenance)}"
     pipeline_error = st.session_state.get("pipeline_result_error", "")
     pipeline_result = st.session_state.get("pipeline_result")
 
