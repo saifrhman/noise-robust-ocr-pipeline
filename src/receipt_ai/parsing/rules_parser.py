@@ -86,9 +86,10 @@ class RuleBasedReceiptParser:
 
         header_stop_markers = ["TAX INVOICE", "INVOICE", "BILL", "ORDER", "DATE", "QTY", "TABLE"]
 
-        for i, line in enumerate(lines[:15]):
+        for i, line in enumerate(lines[:20]):
             up = line.upper()
-            if not vendor_name and any(ch.isalpha() for ch in line) and sum(ch.isalpha() for ch in line) >= 8:
+            # Failure-driven fix: avoid noisy header/meta lines as vendor candidates.
+            if not vendor_name and self._looks_like_vendor_candidate(line):
                 if not any(marker in up for marker in header_stop_markers):
                     vendor_name = line
 
@@ -105,6 +106,8 @@ class RuleBasedReceiptParser:
                     if any(marker in up for marker in ["TAX INVOICE", "INVOICE", "BILL", "DATE", "QTY", "TABLE"]):
                         continue
                     if any(ch.isalpha() for ch in line) and line != vendor_name:
+                        if any(marker in up for marker in ["TEL", "FAX", "ROC", "GST", "SST", "REG"]):
+                            continue
                         address_lines.append(line)
 
         # fallback address search around explicit address-like content
@@ -126,9 +129,10 @@ class RuleBasedReceiptParser:
     def _extract_invoice(self, lines: list[str]) -> InvoiceInfo:
         info = InvoiceInfo()
 
-        bill_re = re.compile(r"\bBILL\s*#?\s*[:=-]?\s*([A-Z0-9-]{3,})", re.IGNORECASE)
-        order_re = re.compile(r"\bORDER\s*#?\s*[:=-]?\s*([A-Z0-9-]{3,})", re.IGNORECASE)
-        table_re = re.compile(r"\bTABLE\s*[:=-]?\s*([A-Z0-9-]{1,})", re.IGNORECASE)
+        # Failure-driven fix: broaden reference number patterns (NO/NO./#, OCR punctuation).
+        bill_re = re.compile(r"\b(?:BILL|BIL|RECEIPT)\s*(?:NO|NO\.|#|NUM|NUMBER)?\s*[:=-]?\s*([A-Z0-9][A-Z0-9-]{1,})", re.IGNORECASE)
+        order_re = re.compile(r"\b(?:ORDER|ORD)\s*(?:NO|NO\.|#|NUM|NUMBER)?\s*[:=-]?\s*([A-Z0-9][A-Z0-9-]{1,})", re.IGNORECASE)
+        table_re = re.compile(r"\b(?:TABLE|TBL)\s*(?:NO|NO\.|#|NUM|NUMBER)?\s*[:=-]?\s*([A-Z0-9][A-Z0-9-]{0,})", re.IGNORECASE)
         cashier_re = re.compile(r"\bCASHIER\s*[:=-]?\s*(.+)$", re.IGNORECASE)
 
         for line in lines:
@@ -141,28 +145,55 @@ class RuleBasedReceiptParser:
                 m = bill_re.search(line)
                 if m:
                     info.bill_number = m.group(1).strip()
+                elif "BILL" in up:
+                    info.bill_number = self._fallback_reference_token(line)
 
             if not info.order_number:
                 m = order_re.search(line)
                 if m:
                     info.order_number = m.group(1).strip()
+                elif "ORDER" in up:
+                    info.order_number = self._fallback_reference_token(line)
 
             if not info.table_number:
                 m = table_re.search(line)
                 if m:
                     info.table_number = m.group(1).strip()
+                elif "TABLE" in up:
+                    info.table_number = self._fallback_reference_token(line)
 
             if not info.cashier:
                 m = cashier_re.search(line)
                 if m:
                     info.cashier = m.group(1).strip()
 
+            # Failure-driven fix: recover date/time from same or neighboring lines.
             if not info.date or not info.time:
                 d, t = extract_date_time(line)
                 if d and not info.date:
                     info.date = d
                 if t and not info.time:
                     info.time = t
+                if (not info.date or not info.time) and line:
+                    parts = [part.strip() for part in re.split(r"\s{2,}|\|", line) if part.strip()]
+                    for part in parts:
+                        d2, t2 = extract_date_time(part)
+                        if d2 and not info.date:
+                            info.date = d2
+                        if t2 and not info.time:
+                            info.time = t2
+
+        # Neighbor fallback for date/time labels split across lines.
+        if not info.date or not info.time:
+            for idx, line in enumerate(lines[:-1]):
+                up = line.upper()
+                nxt = lines[idx + 1]
+                if any(k in up for k in ["DATE", "TIME"]) and nxt:
+                    d, t = extract_date_time(nxt)
+                    if d and not info.date:
+                        info.date = d
+                    if t and not info.time:
+                        info.time = t
 
         # Additional fallback date parse if still missing.
         if not info.date:
@@ -202,7 +233,7 @@ class RuleBasedReceiptParser:
             if self._looks_like_non_item(line):
                 continue
 
-            # Accumulate multi-line item name chunks.
+            # Failure-driven fix: robust multi-line item name grouping.
             pending_name_chunks.append(line)
 
             if pending_detail is not None:
@@ -262,6 +293,23 @@ class RuleBasedReceiptParser:
                             quantity=1.0,
                             unit_price=round(amount, 4),
                             line_total=round(amount, 2),
+                        )
+                    )
+                    i += 2
+                    continue
+
+                # pattern: name -> qty/price/detail on next line
+                detail = self._parse_item_detail(next_line)
+                if detail is not None and detail.line_total > 0:
+                    qty = detail.qty if detail.qty > 0 else 1.0
+                    line_total = detail.line_total
+                    unit_price = round(line_total / qty, 4) if qty > 0 else 0.0
+                    items.append(
+                        ReceiptItem(
+                            name=line,
+                            quantity=qty,
+                            unit_price=unit_price,
+                            line_total=round(line_total, 2),
                         )
                     )
                     i += 2
@@ -372,6 +420,8 @@ class RuleBasedReceiptParser:
         rounding = 0.0
         total = 0.0
 
+        subtotal_candidates: list[float] = []
+        tax_candidates: list[float] = []
         total_candidates: list[float] = []
 
         for idx, line in enumerate(lines):
@@ -389,7 +439,7 @@ class RuleBasedReceiptParser:
                     value = nxt_amounts[-1]
 
             if "SUBTOTAL" in up or "SUB TOTAL" in up:
-                subtotal = max(subtotal, value)
+                subtotal_candidates.append(value)
                 continue
 
             if "SERVICE" in up and "CHARGE" in up:
@@ -397,18 +447,31 @@ class RuleBasedReceiptParser:
                 continue
 
             if ("TAX" in up or "GST" in up) and "SUMMARY" not in up and "INCL" not in up and "EXCL" not in up:
-                tax = max(tax, value)
+                tax_candidates.append(value)
                 continue
 
             if "ROUNDING" in up or "ADJUSTMENT" in up:
                 rounding = value
                 continue
 
-            if "TOTAL" in up:
+            if "TOTAL" in up or "AMT PAYABLE" in up or "AMOUNT PAYABLE" in up or "NETT" in up:
+                # Failure-driven fix: ignore summary rates/quantities misread as totals.
+                if value <= 1 and "%" in up:
+                    continue
                 total_candidates.append(value)
 
+        if subtotal_candidates:
+            subtotal = max(subtotal_candidates)
+        if tax_candidates:
+            tax = max(tax_candidates)
         if total_candidates:
             total = max(total_candidates)
+
+        # Failure-driven fix: keep totals consistent when subtotal/tax are stronger than total line.
+        if total <= 0 and subtotal > 0:
+            total = subtotal + max(tax, 0.0) + max(service_charge, 0.0) + rounding
+        if total > 0 and subtotal <= 0 and tax > 0:
+            subtotal = max(0.0, total - tax - service_charge - rounding)
 
         return TotalsInfo(
             subtotal=round(subtotal, 2),
@@ -437,7 +500,39 @@ class RuleBasedReceiptParser:
                 if amounts:
                     amount_paid = max(amount_paid, amounts[-1])
 
+            # Failure-driven fix: e-wallet and transfer style payment mentions.
+            if any(k in up for k in ["TNG", "E-WALLET", "EWALLET", "TOUCH N GO", "QR", "DUITNOW", "TRANSFER"]):
+                method = method or "ewallet"
+                if amounts:
+                    amount_paid = max(amount_paid, amounts[-1])
+
             if "PAID" in up and amounts:
                 amount_paid = max(amount_paid, amounts[-1])
 
         return PaymentInfo(method=method, amount_paid=round(amount_paid, 2))
+
+    @staticmethod
+    def _looks_like_vendor_candidate(line: str) -> bool:
+        up = line.upper().strip()
+        if len(line.strip()) < 4:
+            return False
+        if sum(ch.isalpha() for ch in line) < 6:
+            return False
+        if any(marker in up for marker in ["TEL", "FAX", "ROC", "GST", "SST", "REG NO", "RECEIPT NO", "CASHIER"]):
+            return False
+        if re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", up):
+            return False
+        return True
+
+    @staticmethod
+    def _fallback_reference_token(line: str) -> str:
+        # Prefer rightmost alphanumeric chunk after separators.
+        parts = re.split(r"[:=#-]", line)
+        candidates = [part.strip() for part in parts if part.strip()]
+        if candidates:
+            tail = candidates[-1]
+            m = re.search(r"([A-Z0-9][A-Z0-9-]{1,})", tail, flags=re.IGNORECASE)
+            if m:
+                return m.group(1).upper()
+        m = re.search(r"\b([A-Z0-9]{2,}(?:-[A-Z0-9]{1,})?)\b", line, flags=re.IGNORECASE)
+        return m.group(1).upper() if m else ""

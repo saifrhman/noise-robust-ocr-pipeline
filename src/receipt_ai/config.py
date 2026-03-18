@@ -54,6 +54,10 @@ class ThresholdConfig:
     model_field_confidence: float = 0.65
     model_entity_confidence: float = 0.50
     amount_tolerance: float = 0.02
+    model_semantic_strong_confidence: float = 0.75
+    model_takeover_margin: float = 0.12
+    low_confidence_guard: float = 0.50
+    total_item_consistency_tolerance: float = 0.08
 
 
 @dataclass(slots=True)
@@ -99,6 +103,20 @@ class ReceiptAIConfig:
         if min_conf:
             try:
                 cfg.ocr.min_confidence = float(min_conf)
+            except ValueError:
+                pass
+
+        model_field_conf = os.getenv("RECEIPT_MODEL_FIELD_CONFIDENCE")
+        if model_field_conf:
+            try:
+                cfg.thresholds.model_field_confidence = float(model_field_conf)
+            except ValueError:
+                pass
+
+        model_semantic_conf = os.getenv("RECEIPT_MODEL_SEMANTIC_CONFIDENCE")
+        if model_semantic_conf:
+            try:
+                cfg.thresholds.model_semantic_strong_confidence = float(model_semantic_conf)
             except ValueError:
                 pass
 

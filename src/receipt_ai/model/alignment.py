@@ -96,9 +96,20 @@ def _token_equivalent(left: str, right: str) -> bool:
         return True
     if not left or not right:
         return False
-    left_norm = left.replace("0", "O").replace("1", "I")
-    right_norm = right.replace("0", "O").replace("1", "I")
-    return left_norm == right_norm
+    if len(left) != len(right):
+        return False
+    # Failure-driven fix: restrict OCR fuzzy equivalence to common single-char confusions.
+    confusion_pairs = {("0", "O"), ("O", "0"), ("1", "I"), ("I", "1"), ("5", "S"), ("S", "5")}
+    mismatches = 0
+    for lch, rch in zip(left, right):
+        if lch == rch:
+            continue
+        if (lch, rch) in confusion_pairs:
+            mismatches += 1
+            continue
+        return False
+    # Allow at most one OCR-style mismatch to avoid broad false-positive matching.
+    return mismatches <= 1
 
 
 def _phrase_to_tokens(text: str) -> list[str]:
@@ -151,13 +162,19 @@ def _label_scalar_fields(
         phrase_tokens = _phrase_to_tokens(value)
         if not phrase_tokens:
             continue
+        if not _entity_value_is_reliable(entity, phrase_tokens, value):
+            continue
 
         # Prefer line-local exact/fuzzy alignment for header-like and totals-like fields.
         if entity in line_biased_entities:
             if _label_from_line_context(lines, tokens, labels, phrase_tokens, entity, line_to_indexes):
                 continue
 
-        for start, end in _find_spans(tokens, phrase_tokens):
+        spans = _find_spans(tokens, phrase_tokens)
+        if len(phrase_tokens) == 1 and len(spans) > 3:
+            # Failure-driven fix: skip highly ambiguous single-token assignments.
+            continue
+        for start, end in spans:
             if _can_write_span(labels, start, end):
                 _write_span(labels, start, end, entity)
                 break
@@ -216,6 +233,9 @@ def _label_item_fields(
     for item in item_list:
         item_name_tokens = _phrase_to_tokens(item.name)
         if not item_name_tokens:
+            continue
+        if len(item_name_tokens) == 1 and len(item_name_tokens[0]) <= 2:
+            # Failure-driven fix: avoid short noisy ITEM_NAME pseudo labels.
             continue
 
         # Prefer exact line containment for item names.
@@ -294,10 +314,38 @@ def _label_numeric_entity(
             if labels[idx] != "O":
                 continue
             norm = _normalize_token(tokens[idx].text)
-            if norm in candidate_norms:
+            if norm in candidate_norms and _numeric_token_ok(tokens[idx].text, entity):
                 labels[idx] = f"B-{entity}"
                 return True
     return False
+
+
+def _entity_value_is_reliable(entity: str, phrase_tokens: list[str], raw_value: str) -> bool:
+    joined = "".join(phrase_tokens)
+    if entity in {"BILL_NO", "ORDER_NO", "TABLE_NO"}:
+        return len(joined) >= 2 and any(ch.isdigit() for ch in joined)
+    if entity == "TIME":
+        return ":" in raw_value or re.search(r"\b\d{1,2}[:.]\d{2}\b", raw_value) is not None
+    if entity in {"SUBTOTAL", "TAX"}:
+        return any(ch.isdigit() for ch in joined)
+    if entity == "CASHIER":
+        return len(joined) >= 4
+    if entity == "PAYMENT_METHOD":
+        return len(joined) >= 3
+    return True
+
+
+def _numeric_token_ok(text: str, entity: str) -> bool:
+    norm = _normalize_token(text)
+    if not norm:
+        return False
+    if entity == "ITEM_QTY":
+        # Reduce false positives: quantities are usually compact numeric tokens.
+        return norm.isdigit() and len(norm) <= 3
+    if entity == "ITEM_PRICE":
+        # Prefer decimal-like or multi-digit tokens for prices.
+        return any(ch.isdigit() for ch in norm) and len(norm) >= 2
+    return any(ch.isdigit() for ch in norm)
 
 
 def _enforce_valid_bio(labels: list[str]) -> None:

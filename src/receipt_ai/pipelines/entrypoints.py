@@ -181,7 +181,15 @@ def run_hybrid(
     )
     model_result = run_layoutlm_only(image_path, config=cfg, ocr_engine=ocr_engine, model_backend=model_backend)
 
-    fused = _fuse_results(rules_result, model_result, threshold=cfg.thresholds.model_field_confidence)
+    fused = _fuse_results(
+        rules_result,
+        model_result,
+        threshold=cfg.thresholds.model_field_confidence,
+        semantic_threshold=cfg.thresholds.model_semantic_strong_confidence,
+        takeover_margin=cfg.thresholds.model_takeover_margin,
+        low_confidence_guard=cfg.thresholds.low_confidence_guard,
+        amount_tolerance=cfg.thresholds.total_item_consistency_tolerance,
+    )
     fused.metadata.mode = "hybrid"
     return fused
 
@@ -191,6 +199,10 @@ def _fuse_results(
     model: ReceiptExtractionResult,
     *,
     threshold: float,
+    semantic_threshold: float,
+    takeover_margin: float,
+    low_confidence_guard: float,
+    amount_tolerance: float,
 ) -> ReceiptExtractionResult:
     """Field-aware fusion keeping rules for numeric cleanup and model for strong semantic fields."""
     out = deepcopy(rules)
@@ -202,7 +214,19 @@ def _fuse_results(
         out.metadata.field_confidences.setdefault(field_name, float(rules.metadata.confidence))
         out.metadata.field_provenance.setdefault(field_name, "easyocr_rules")
 
-    _merge_text_field(out, "vendor.name", rules.vendor.name, model.vendor.name, rules, model, threshold, prefer_model=True)
+    _merge_text_field(
+        out,
+        "vendor.name",
+        rules.vendor.name,
+        model.vendor.name,
+        rules,
+        model,
+        threshold,
+        prefer_model=True,
+        semantic_threshold=semantic_threshold,
+        takeover_margin=takeover_margin,
+        low_confidence_guard=low_confidence_guard,
+    )
     _merge_text_field(
         out,
         "vendor.registration_number",
@@ -212,21 +236,144 @@ def _fuse_results(
         model,
         threshold,
         prefer_model=True,
+        semantic_threshold=semantic_threshold,
+        takeover_margin=takeover_margin,
+        low_confidence_guard=low_confidence_guard,
     )
-    _merge_text_field(out, "vendor.address", rules.vendor.address, model.vendor.address, rules, model, threshold, prefer_model=True)
-    _merge_text_field(out, "invoice.invoice_type", rules.invoice.invoice_type, model.invoice.invoice_type, rules, model, threshold, prefer_model=True)
-    _merge_text_field(out, "invoice.bill_number", rules.invoice.bill_number, model.invoice.bill_number, rules, model, threshold, prefer_model=False)
-    _merge_text_field(out, "invoice.order_number", rules.invoice.order_number, model.invoice.order_number, rules, model, threshold, prefer_model=False)
-    _merge_text_field(out, "invoice.table_number", rules.invoice.table_number, model.invoice.table_number, rules, model, threshold, prefer_model=False)
-    _merge_text_field(out, "invoice.date", rules.invoice.date, model.invoice.date, rules, model, threshold, prefer_model=True)
-    _merge_text_field(out, "invoice.time", rules.invoice.time, model.invoice.time, rules, model, threshold, prefer_model=True)
-    _merge_text_field(out, "invoice.cashier", rules.invoice.cashier, model.invoice.cashier, rules, model, threshold, prefer_model=False)
+    _merge_text_field(
+        out,
+        "vendor.address",
+        rules.vendor.address,
+        model.vendor.address,
+        rules,
+        model,
+        threshold,
+        prefer_model=True,
+        semantic_threshold=semantic_threshold,
+        takeover_margin=takeover_margin,
+        low_confidence_guard=low_confidence_guard,
+    )
+    _merge_text_field(
+        out,
+        "invoice.invoice_type",
+        rules.invoice.invoice_type,
+        model.invoice.invoice_type,
+        rules,
+        model,
+        threshold,
+        prefer_model=True,
+        semantic_threshold=semantic_threshold,
+        takeover_margin=takeover_margin,
+        low_confidence_guard=low_confidence_guard,
+    )
+    _merge_text_field(
+        out,
+        "invoice.bill_number",
+        rules.invoice.bill_number,
+        model.invoice.bill_number,
+        rules,
+        model,
+        threshold,
+        prefer_model=False,
+        semantic_threshold=semantic_threshold,
+        takeover_margin=takeover_margin,
+        low_confidence_guard=low_confidence_guard,
+    )
+    _merge_text_field(
+        out,
+        "invoice.order_number",
+        rules.invoice.order_number,
+        model.invoice.order_number,
+        rules,
+        model,
+        threshold,
+        prefer_model=False,
+        semantic_threshold=semantic_threshold,
+        takeover_margin=takeover_margin,
+        low_confidence_guard=low_confidence_guard,
+    )
+    _merge_text_field(
+        out,
+        "invoice.table_number",
+        rules.invoice.table_number,
+        model.invoice.table_number,
+        rules,
+        model,
+        threshold,
+        prefer_model=False,
+        semantic_threshold=semantic_threshold,
+        takeover_margin=takeover_margin,
+        low_confidence_guard=low_confidence_guard,
+    )
+    _merge_text_field(
+        out,
+        "invoice.date",
+        rules.invoice.date,
+        model.invoice.date,
+        rules,
+        model,
+        threshold,
+        prefer_model=True,
+        semantic_threshold=semantic_threshold,
+        takeover_margin=takeover_margin,
+        low_confidence_guard=low_confidence_guard,
+    )
+    _merge_text_field(
+        out,
+        "invoice.time",
+        rules.invoice.time,
+        model.invoice.time,
+        rules,
+        model,
+        threshold,
+        prefer_model=True,
+        semantic_threshold=semantic_threshold,
+        takeover_margin=takeover_margin,
+        low_confidence_guard=low_confidence_guard,
+    )
+    _merge_text_field(
+        out,
+        "invoice.cashier",
+        rules.invoice.cashier,
+        model.invoice.cashier,
+        rules,
+        model,
+        threshold,
+        prefer_model=False,
+        semantic_threshold=semantic_threshold,
+        takeover_margin=takeover_margin,
+        low_confidence_guard=low_confidence_guard,
+    )
 
     _merge_numeric_field(out, "totals.subtotal", rules.totals.subtotal, model.totals.subtotal, rules, model, threshold)
     _merge_numeric_field(out, "totals.tax", rules.totals.tax, model.totals.tax, rules, model, threshold)
     _merge_numeric_field(out, "totals.total", rules.totals.total, model.totals.total, rules, model, threshold)
-    _merge_text_field(out, "totals.currency", rules.totals.currency, model.totals.currency, rules, model, threshold, prefer_model=False)
-    _merge_text_field(out, "payment.method", rules.payment.method, model.payment.method, rules, model, threshold, prefer_model=False)
+    _merge_text_field(
+        out,
+        "totals.currency",
+        rules.totals.currency,
+        model.totals.currency,
+        rules,
+        model,
+        threshold,
+        prefer_model=False,
+        semantic_threshold=semantic_threshold,
+        takeover_margin=takeover_margin,
+        low_confidence_guard=low_confidence_guard,
+    )
+    _merge_text_field(
+        out,
+        "payment.method",
+        rules.payment.method,
+        model.payment.method,
+        rules,
+        model,
+        threshold,
+        prefer_model=False,
+        semantic_threshold=semantic_threshold,
+        takeover_margin=takeover_margin,
+        low_confidence_guard=low_confidence_guard,
+    )
     _merge_numeric_field(out, "payment.amount_paid", rules.payment.amount_paid, model.payment.amount_paid, rules, model, threshold)
 
     if _item_quality_score(model.items) > _item_quality_score(rules.items):
@@ -239,6 +386,25 @@ def _fuse_results(
         out.metadata.field_provenance.setdefault("items", "easyocr_rules")
 
     out.metadata.confidence = max(rules.metadata.confidence, model.metadata.confidence)
+
+    # Policy check: keep totals coherent with item implied sum when available.
+    implied_total = _items_implied_total(out.items)
+    if out.totals.total > 0 and implied_total > 0 and not _within_rel_tolerance(out.totals.total, implied_total, amount_tolerance):
+        rules_total = rules.totals.total
+        model_total = model.totals.total
+        if rules_total > 0 and _within_rel_tolerance(rules_total, implied_total, amount_tolerance):
+            out.totals.total = rules_total
+            out.metadata.field_provenance["totals.total"] = "easyocr_rules"
+            out.metadata.warnings.append("Hybrid adjusted totals.total to rules for item-total consistency.")
+        elif model_total > 0 and _within_rel_tolerance(model_total, implied_total, amount_tolerance):
+            out.totals.total = model_total
+            out.metadata.field_provenance["totals.total"] = "layoutlm_only"
+            out.metadata.warnings.append("Hybrid adjusted totals.total to model for item-total consistency.")
+        else:
+            out.metadata.warnings.append("Hybrid detected conflict between totals.total and item implied sum.")
+
+    # Explicitly surface missing critical fields from one source for diagnostics.
+    _warn_critical_missing(out, rules, model)
     return out
 
 
@@ -252,6 +418,9 @@ def _merge_text_field(
     threshold: float,
     *,
     prefer_model: bool,
+    semantic_threshold: float,
+    takeover_margin: float,
+    low_confidence_guard: float,
 ) -> None:
     rule_text = (rules_value or "").strip()
     model_text = (model_value or "").strip()
@@ -264,14 +433,25 @@ def _merge_text_field(
         chosen_value = model_text
         chosen_source = "layoutlm_only"
         chosen_conf = model_conf
-    elif model_text and prefer_model and model_conf >= threshold:
+    elif model_text and prefer_model and model_conf >= semantic_threshold:
         chosen_value = model_text
         chosen_source = "layoutlm_only"
         chosen_conf = model_conf
-    elif model_text and model_conf > chosen_conf and model_conf >= threshold and len(model_text) >= len(rule_text):
+    elif (
+        model_text
+        and model_conf > chosen_conf + takeover_margin
+        and model_conf >= threshold
+        and len(model_text) >= len(rule_text)
+    ):
         chosen_value = model_text
         chosen_source = "layoutlm_only"
         chosen_conf = model_conf
+
+    # Guard against low-confidence model overriding strong rule text.
+    if rule_text and model_text and chosen_source == "layoutlm_only" and model_conf < low_confidence_guard:
+        chosen_value = rule_text
+        chosen_source = "easyocr_rules"
+        chosen_conf = _field_confidence(rules, field_name)
 
     _assign_field(out, field_name, chosen_value)
     if chosen_value:
@@ -385,3 +565,36 @@ def _to_float(value: str) -> float:
         return float(text)
     except ValueError:
         return 0.0
+
+
+def _items_implied_total(items: list[ReceiptItem]) -> float:
+    if not items:
+        return 0.0
+    return round(sum(max(item.line_total, 0.0) for item in items), 2)
+
+
+def _within_rel_tolerance(left: float, right: float, tolerance: float) -> bool:
+    if left <= 0 and right <= 0:
+        return True
+    if left <= 0 or right <= 0:
+        return False
+    return abs(left - right) / max(abs(left), abs(right)) <= tolerance
+
+
+def _warn_critical_missing(
+    out: ReceiptExtractionResult,
+    rules: ReceiptExtractionResult,
+    model: ReceiptExtractionResult,
+) -> None:
+    checks = [
+        ("vendor.name", rules.vendor.name, model.vendor.name),
+        ("invoice.date", rules.invoice.date, model.invoice.date),
+        ("totals.total", str(rules.totals.total if rules.totals.total > 0 else ""), str(model.totals.total if model.totals.total > 0 else "")),
+    ]
+    for field_name, rule_val, model_val in checks:
+        r = (rule_val or "").strip()
+        m = (model_val or "").strip()
+        if r and not m:
+            out.metadata.warnings.append(f"Hybrid kept rules {field_name}: model missing value.")
+        elif m and not r:
+            out.metadata.warnings.append(f"Hybrid used model {field_name}: rules missing value.")
