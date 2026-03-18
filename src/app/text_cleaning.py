@@ -3,6 +3,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Optional
+import warnings
+
+
+warnings.warn(
+    "src.app.text_cleaning is deprecated. Use src.receipt_ai.parsing.normalization instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 try:
     from symspellpy import SymSpell, Verbosity

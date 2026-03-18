@@ -3,6 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import warnings
+
+
+warnings.warn(
+    "infer_layoutlmv3_receipt.py is deprecated. Use app.py or scripts/run_receipt_ai_batch.py, "
+    "which run the unified src.receipt_ai pipeline.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 from data_utils import prepare_words_boxes_for_inference
 from src.app.extraction_modes import (

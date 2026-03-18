@@ -3,6 +3,14 @@ from __future__ import annotations
 
 import re
 from typing import Optional, List
+import warnings
+
+
+warnings.warn(
+    "src.app.extract_fields is deprecated. Use src.receipt_ai.parsing and src.receipt_ai.schemas instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 # ----------------------------

@@ -1,16 +1,23 @@
 """
-Mode-specific extraction and normalization logic for receipt OCR pipeline.
+Deprecated legacy app-side extraction builders.
 
-Supports three distinct modes:
-1. EasyOCR + Rules: Rule-based extraction with receipt script parser
-2. LayoutLMv3 Only: Pure model-based semantic entity extraction
-3. Hybrid: Combined model + parser output with fusion logic
+The Streamlit app now uses `src.receipt_ai.pipelines.entrypoints` as the
+single extraction source of truth. Keep this module only for backward
+compatibility with older scripts.
 """
 
 from __future__ import annotations
 
 import re
 from typing import Any
+import warnings
+
+
+warnings.warn(
+    "src.app.extraction_modes is deprecated. Use src.receipt_ai.pipelines.entrypoints instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 # ==============================================================================

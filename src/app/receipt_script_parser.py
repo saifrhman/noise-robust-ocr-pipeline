@@ -2,6 +2,14 @@ from __future__ import annotations
 
 import re
 from typing import Any
+import warnings
+
+
+warnings.warn(
+    "src.app.receipt_script_parser is deprecated. Use src.receipt_ai.parsing.rules_parser instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 MONEY_RE = re.compile(r"\b\d{1,6}[.,]\d{2}\b")

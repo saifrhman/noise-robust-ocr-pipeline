@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 import re
 from typing import Any
+import warnings
 
 import numpy as np
 from PIL import Image
@@ -15,6 +16,14 @@ try:
 except ImportError:  # pragma: no cover - optional dependency at import time
     AutoModelForTokenClassification = None
     AutoProcessor = None
+
+
+warnings.warn(
+    "src.layoutlmv3_engine is deprecated. Use src.receipt_ai.model.inference "
+    "and src.receipt_ai.pipelines.entrypoints instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 def _clamp(value: int, low: int, high: int) -> int:
